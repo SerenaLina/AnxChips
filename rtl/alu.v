@@ -1,67 +1,99 @@
 module alu(
-    input [31:0]alu_src1,
-    input [31:0]alu_src2,
-    input [15:0] alu_op,
-    output [31:0] alu_result
+  input  wire [11:0] alu_op,
+  input  wire [31:0] alu_src1,
+  input  wire [31:0] alu_src2,
+  output wire [31:0] alu_result
 );
-wire is_addw;
-wire is_addiw;
-wire is_subw;
-wire is_slt; 
-wire is_sltu;
 
-wire is_and;
-wire is_or;
-wire is_nor;
-wire is_xor;
-wire is_logic;
+wire op_add;   //add operation
+wire op_sub;   //sub operation
+wire op_slt;   //signed compared and set less than
+wire op_sltu;  //unsigned compared and set less than
+wire op_and;   //bitwise and
+wire op_nor;   //bitwise nor
+wire op_or;    //bitwise or
+wire op_xor;   //bitwise xor
+wire op_sll;   //logic left shift
+wire op_srl;   //logic right shift
+wire op_sra;   //arithmetic right shift
+wire op_lui;   //Load Upper Immediate
 
-wire [31:0] adder_src1;
-wire [31:0] adder_src2;
-wire adder_cin;
+// control code decomposition
+assign op_add  = alu_op[ 0];
+assign op_sub  = alu_op[ 1];
+assign op_slt  = alu_op[ 2];
+assign op_sltu = alu_op[ 3];
+assign op_and  = alu_op[ 4];
+assign op_nor  = alu_op[ 5];
+assign op_or   = alu_op[ 6];
+assign op_xor  = alu_op[ 7];
+assign op_sll  = alu_op[ 8];
+assign op_srl  = alu_op[ 9];
+assign op_sra  = alu_op[10];
+assign op_lui  = alu_op[11];
+
+wire [31:0] add_sub_result;
+wire [31:0] slt_result;
+wire [31:0] sltu_result;
+wire [31:0] and_result;
+wire [31:0] nor_result;
+wire [31:0] or_result;
+wire [31:0] xor_result;
+wire [31:0] lui_result;
+wire [31:0] sll_result;
+wire [63:0] sr64_result;
+wire [31:0] sr_result;
+
+
+// 32-bit adder
+wire [31:0] adder_a;
+wire [31:0] adder_b;
+wire        adder_cin;
 wire [31:0] adder_result;
-wire adder_cout;
-wire adder_of; // signed overflow
+wire        adder_cout;
 
+assign adder_a   = alu_src1;
+assign adder_b   = (op_sub | op_slt | op_sltu) ? ~alu_src2 : alu_src2;  //src1 - src2 rj-rk
+assign adder_cin = (op_sub | op_slt | op_sltu) ? 1'b1      : 1'b0;
+assign {adder_cout, adder_result} = adder_a + adder_b + adder_cin;
 
-assign is_addw  = (alu_op == 16'h01) ? 1'b1 : 1'b0;
-assign is_addiw = (alu_op == 16'h02) ? 1'b1 : 1'b0;
-assign is_subw  = (alu_op == 16'h04) ? 1'b1 : 1'b0;
-assign is_slt   = (alu_op == 16'h08) ? 1'b1 : 1'b0;
-assign is_sltu  = (alu_op == 16'h10) ? 1'b1 : 1'b0;
+// ADD, SUB result
+assign add_sub_result = adder_result;
 
-assign is_and   = (alu_op == 16'h100)? 1'b1 : 1'b0;
-assign is_or    = (alu_op == 16'h80) ? 1'b1 : 1'b0;
-assign is_nor   = (alu_op == 16'h40) ? 1'b1 : 1'b0;
-assign is_xor   = (alu_op == 16'h20) ? 1'b1 : 1'b0;
-assign is_logic = (is_and | is_or | is_nor | is_xor);
+// SLT result
+assign slt_result[31:1] = 31'b0;   //rj < rk 1
+assign slt_result[0]    = (alu_src1[31] & ~alu_src2[31])
+                        | ((alu_src1[31] ~^ alu_src2[31]) & adder_result[31]);
 
+// SLTU result
+assign sltu_result[31:1] = 31'b0;
+assign sltu_result[0]    = ~adder_cout;
 
+// bitwise operation
+assign and_result = alu_src1 & alu_src2;
+assign or_result  = alu_src1 | alu_src2;
+assign nor_result = ~or_result;
+assign xor_result = alu_src1 ^ alu_src2;
+assign lui_result = alu_src2;
 
-assign adder_src1 = alu_src1;
-assign adder_src2 = (is_subw | is_slt | is_sltu ) ? (~alu_src2) : alu_src2;
-assign adder_cin  = (is_subw | is_slt | is_sltu ) ? 1'b1 : 1'b0;
+// SLL result
+assign sll_result = alu_src1 << alu_src2[4:0];   //rj << ui5
 
-adder u_adder(
-    .adder_src1(adder_src1),
-    .adder_src2(adder_src2),
-    .adder_cin(adder_cin),
-    .adder_result(adder_result),
-    .adder_cout(adder_cout),
-    .adder_of(adder_of)
-);
+// SRL, SRA result
+assign sr64_result = {{32{op_sra & alu_src1[31]}}, alu_src1[31:0]} >> alu_src2[4:0]; //rj >> i5
 
+assign sr_result   = sr64_result[31:0];
 
-wire [31:0] logic_result = is_and ?  (alu_src1 & alu_src2) :
-                           is_or  ?  (alu_src1 | alu_src2) :
-                           is_nor ? ~(alu_src1 | alu_src2) :
-                           is_xor ?  (alu_src1 ^ alu_src2) :
-                                     32'b0;
-
-assign alu_result = is_slt  ? {31'b0, (adder_result[31] ^ adder_of)} :
-                    is_sltu ? {31'b0, (!adder_cout)} : // 无符号：没进位即借位，A < B
-                    is_logic ? logic_result :
-                               adder_result;
-
+// final result mux
+assign alu_result = ({32{op_add|op_sub}} & add_sub_result)
+                  | ({32{op_slt       }} & slt_result)
+                  | ({32{op_sltu      }} & sltu_result)
+                  | ({32{op_and       }} & and_result)
+                  | ({32{op_nor       }} & nor_result)
+                  | ({32{op_or        }} & or_result)
+                  | ({32{op_xor       }} & xor_result)
+                  | ({32{op_lui       }} & lui_result)
+                  | ({32{op_sll       }} & sll_result)
+                  | ({32{op_srl|op_sra}} & sr_result);
 
 endmodule
