@@ -8,16 +8,17 @@ module exe_stage(
     output                         es_allowin    ,
     //from ds
     input                          ds_to_es_valid,
-    input  [`DS_TO_ES_BUS_WD -1:0] ds_to_es_bus  ,
+    input  [`DS_TO_ES_BUS_WD -1:0]  ds_to_es_bus  ,
     //to ms
     output                         es_to_ms_valid,
-    output [`ES_TO_MS_BUS_WD -1:0] es_to_ms_bus  ,
+    output [`ES_TO_MS_BUS_WD -1:0]  es_to_ms_bus  ,
+    output [4:0]                   es_to_ds_dest,
 
     // data sram interface(write)
     output        data_sram_en   ,
     output [ 3:0] data_sram_we   ,
     output [31:0] data_sram_addr ,
-    output [31:0] data_sram_wdata
+    output [31:0] data_sram_wdata,
 );
 
 reg         es_valid      ;
@@ -39,6 +40,7 @@ wire [31:0] rj_value;
 wire [31:0] rkd_value;
 wire [31:0] imm;
 wire [31:0] es_pc;
+wire [31:0] es_inst;
 
 
 assign {alu_op,
@@ -53,7 +55,8 @@ assign {alu_op,
         rj_value,
         rkd_value,
         es_pc,
-        res_from_mem
+        res_from_mem,
+        es_inst
        } = ds_to_es_bus_r;
 
 wire [31:0] alu_src1   ;
@@ -71,7 +74,8 @@ assign es_to_ms_bus = {res_from_mem,  //70:70 1
                        gr_we       ,  //69:69 1
                        dest        ,  //68:64 5
                        alu_result  ,  //63:32 32
-                       es_pc          //31:0  32
+                       es_pc,           //31:0
+                       es_inst     // 32
                       };
 
 assign es_ready_go    = 1'b1;
@@ -105,5 +109,7 @@ assign data_sram_we    = es_mem_we && es_valid ? 4'hf : 4'h0;
 assign data_sram_addr  = alu_result;
 assign data_sram_wdata = rkd_value;
 
+
+assign es_to_ds_dest = es_valid ? dest : 5'b0; // only forward valid dest to ID stage for data hazard detection
 
 endmodule
