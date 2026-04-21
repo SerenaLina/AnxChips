@@ -36,12 +36,14 @@ wire         ds_to_es_valid;
 wire         es_to_ms_valid;
 wire         ms_to_ws_valid;
 
+wire         es_res_from_mem;
+
 wire  [4:0]       es_to_ds_dest;
 wire  [4:0]       ms_to_ds_dest;
 wire  [4:0]       ws_to_ds_dest;
-wire        es_to_ds_is_load;
-wire        ms_to_ds_is_load;
-wire        ws_to_ds_is_load;
+wire  [31:0]      es_result;
+wire  [31:0]      ms_result;
+wire  [31:0]      ws_result;
 
 
 wire        es_valid;
@@ -85,6 +87,9 @@ id_stage id_stage(
     .es_to_ds_dest   (es_to_ds_dest   ),
     .ms_to_ds_dest   (ms_to_ds_dest   ),
     .ws_to_ds_dest   (ws_to_ds_dest   ),
+    .es_result       (es_result       ),
+    .ms_result       (ms_result       ),
+    .ws_result       (ws_result       ),
 
 
     .es_valid       (es_valid       ),
@@ -95,6 +100,7 @@ id_stage id_stage(
     .ds_to_es_bus   (ds_to_es_bus   ),
     //to fs
     .br_bus         (br_bus         ),
+    .es_res_from_mem (es_res_from_mem   ),
     //to rf: for write back
     .ws_to_rf_bus   (ws_to_rf_bus   ),
     .debug_id_rf_raddr1(debug_id_rf_raddr1),
@@ -114,11 +120,14 @@ exe_stage exe_stage(
     .es_to_ms_valid (es_to_ms_valid ),
     .es_to_ms_bus   (es_to_ms_bus   ),
     .es_to_ds_dest   (es_to_ds_dest   ),
+    .es_result       (es_result       ),
     // data sram interface
     .data_sram_en   (data_sram_en   ),
     .data_sram_we   (data_sram_we  ),
     .data_sram_addr (data_sram_addr ),
-    .data_sram_wdata(data_sram_wdata)
+    .data_sram_wdata(data_sram_wdata),
+    .ms_load_wait   (ms_load_wait   ),
+    .es_res_from_mem(es_res_from_mem)
 );
 // MEM stage
 mem_stage mem_stage(
@@ -131,11 +140,13 @@ mem_stage mem_stage(
     .es_to_ms_valid (es_to_ms_valid ),
     .es_to_ms_bus   (es_to_ms_bus   ),
     .ms_to_ds_dest   (ms_to_ds_dest   ),
+    .ms_result       (ms_result       ),
     //to ws
     .ms_to_ws_valid (ms_to_ws_valid ),
     .ms_to_ws_bus   (ms_to_ws_bus   ),
     //from data-sram
-    .data_sram_rdata(data_sram_rdata)
+    .data_sram_rdata(data_sram_rdata),
+    .ms_load_wait   (ms_load_wait   )
 );
 // WB stage
 wb_stage wb_stage(
@@ -149,6 +160,7 @@ wb_stage wb_stage(
     //to rf: for write back
     .ws_to_rf_bus   (ws_to_rf_bus   ),
     .ws_to_ds_dest   (ws_to_ds_dest   ),
+    .ws_result       (ws_result       ),
     //trace debug interface
     .debug_wb_pc      (debug_wb_pc      ),
     .debug_wb_rf_we   (debug_wb_rf_we   ),

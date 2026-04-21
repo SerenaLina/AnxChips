@@ -9,16 +9,19 @@ module exe_stage(
     //from ds
     input                          ds_to_es_valid,
     input  [`DS_TO_ES_BUS_WD -1:0]  ds_to_es_bus  ,
+    input                          ms_load_wait   ,
     //to ms
     output                         es_to_ms_valid,
     output [`ES_TO_MS_BUS_WD -1:0]  es_to_ms_bus  ,
     output [4:0]                   es_to_ds_dest,
+    output [31:0]                  es_result,
+    output                         es_res_from_mem,
 
     // data sram interface(write)
     output        data_sram_en   ,
     output [ 3:0] data_sram_we   ,
     output [31:0] data_sram_addr ,
-    output [31:0] data_sram_wdata,
+    output [31:0] data_sram_wdata
 );
 
 reg         es_valid      ;
@@ -66,7 +69,7 @@ wire [31:0] alu_result ;
 
 // did't use in lab7
 wire        es_res_from_mem;
-assign es_res_from_mem = es_load_op;
+assign es_res_from_mem = es_valid ? (es_load_op || ms_load_wait) : 1'b0; // only forward valid load_op to ID stage for data hazard detection
 
 
 
@@ -78,8 +81,8 @@ assign es_to_ms_bus = {res_from_mem,  //70:70 1
                        es_inst     // 32
                       };
 
-assign es_ready_go    = 1'b1;
-assign es_allowin     = !es_valid || es_ready_go && ms_allowin;
+assign es_ready_go    = 1'b1; // wait for mem if load
+assign es_allowin     = !es_valid || (es_ready_go && ms_allowin); // wait for mem if load
 assign es_to_ms_valid =  es_valid && es_ready_go;
 always @(posedge clk) begin
     if (reset) begin
@@ -89,7 +92,7 @@ always @(posedge clk) begin
         es_valid <= ds_to_es_valid;
     end
 
-    if (ds_to_es_valid && es_allowin) begin
+    if ((ds_to_es_valid && es_allowin)) begin
         ds_to_es_bus_r <= ds_to_es_bus;
     end
 end
@@ -110,6 +113,7 @@ assign data_sram_addr  = alu_result;
 assign data_sram_wdata = rkd_value;
 
 
-assign es_to_ds_dest = es_valid ? dest : 5'b0; // only forward valid dest to ID stage for data hazard detection
+assign es_to_ds_dest = (es_valid && gr_we) ? dest : 5'b0; // only forward valid dest to ID stage for data hazard detection
+assign es_result     = alu_result;
 
 endmodule
