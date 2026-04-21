@@ -9,13 +9,25 @@ module id_stage(
     //from fs
     input                          fs_to_ds_valid,
     input  [`FS_TO_DS_BUS_WD -1:0] fs_to_ds_bus  ,
+    input                          es_res_from_mem   ,
+    input [4:0] es_to_ds_dest,
+    input [4:0] ms_to_ds_dest,
+    input [4:0] ws_to_ds_dest,
+    input [31:0] es_result,
+    input [31:0] ms_result,
+    input [31:0] ws_result,
+    input        es_valid,
+    input        ms_valid,
+    input        ws_valid,
     //to es
     output                         ds_to_es_valid,
     output [`DS_TO_ES_BUS_WD -1:0] ds_to_es_bus  ,
     //to fs
     output [`BR_BUS_WD       -1:0] br_bus        ,
     //to rf: for write back
-    input  [`WS_TO_RF_BUS_WD -1:0] ws_to_rf_bus
+    input  [`WS_TO_RF_BUS_WD -1:0] ws_to_rf_bus,
+    output [4:0] debug_id_rf_raddr1,
+    output [31:0] debug_id_rf_rdata1
 );
 
 wire        br_taken;
@@ -106,6 +118,14 @@ wire [31:0] mem_result;
 wire [31:0] final_result;
 
 
+// =============data stall
+wire src_no_rj;
+wire rj_wait;
+wire rk_wait;
+wire rd_wait;
+wire no_wait;
+// =============
+
 assign op_31_26  = ds_inst[31:26];
 assign op_25_22  = ds_inst[25:22];
 assign op_21_20  = ds_inst[21:20];
@@ -145,6 +165,9 @@ assign inst_bl     = op_31_26_d[6'h15];
 assign inst_beq    = op_31_26_d[6'h16];
 assign inst_bne    = op_31_26_d[6'h17];
 assign inst_lu12i_w= op_31_26_d[6'h05] & ~ds_inst[25];
+
+
+assign load_op = inst_ld_w;
 
 assign alu_op[ 0] = inst_add_w | inst_addi_w | inst_ld_w | inst_st_w
                     | inst_jirl | inst_bl;
@@ -210,8 +233,14 @@ regfile u_regfile(
     .wdata  (rf_wdata )
     );
 
-assign rj_value  = rf_rdata1;
-assign rkd_value = rf_rdata2;
+assign rj_value  = rj_wait ? ((rj == es_to_ds_dest) ? es_result :
+                              (rj == ms_to_ds_dest) ? ms_result : ws_result)
+                            : rf_rdata1;
+assign rkd_value = rk_wait ? ((rk == es_to_ds_dest) ? es_result :
+                            (rk == ms_to_ds_dest) ? ms_result : ws_result) : 
+                   rd_wait ? ((rd == es_to_ds_dest) ? es_result :
+                            (rd == ms_to_ds_dest) ? ms_result : ws_result) :
+                   rf_rdata2;
 
 assign rj_eq_rd = (rj_value == rkd_value);
 assign br_taken = (   inst_beq  &&  rj_eq_rd
@@ -219,16 +248,38 @@ assign br_taken = (   inst_beq  &&  rj_eq_rd
                    || inst_jirl
                    || inst_bl
                    || inst_b
-                )  && ds_valid;
+)  && ds_valid && ~load_wait;
+wire br_cancel;
+assign br_cancel = br_taken;
 assign br_target = (inst_beq || inst_bne || inst_bl || inst_b) ? (ds_pc + br_offs) :
                                                    /*inst_jirl*/ (rj_value + jirl_offs);
 
-assign br_bus = {br_taken, br_target};
+
+//  ==============data stall
+assign src_no_rj = (inst_b | inst_bl | inst_lu12i_w);
+assign src_no_rk    = inst_slli_w | inst_srli_w | inst_srai_w | inst_addi_w | inst_ld_w | inst_st_w | inst_jirl | 
+                      inst_b | inst_bl | inst_beq | inst_bne | inst_lu12i_w;
+assign src_no_rd    = ~inst_st_w & ~inst_beq & ~inst_bne;
+assign rj_wait = ~src_no_rj && (rj != 5'b00000) 
+            && ((rj == es_to_ds_dest)  
+              || (rj == ms_to_ds_dest)    
+              || (rj == ws_to_ds_dest));   
+
+assign rk_wait = ~src_no_rk && (rk != 5'b00000) && ((rk == es_to_ds_dest) || (rk == ms_to_ds_dest) || (rk == ws_to_ds_dest));
+assign rd_wait = ~src_no_rd && (rd != 5'b00000) && ((rd == es_to_ds_dest) || (rd == ms_to_ds_dest) || (rd == ws_to_ds_dest));
+
+
+assign no_wait = ~rj_wait && ~rk_wait && ~rd_wait;
+
+wire  load_wait = (rj == es_to_ds_dest) && es_res_from_mem ||
+                   (rk == es_to_ds_dest) && es_res_from_mem;
+// ===============
+assign br_bus = {br_taken,br_target,br_cancel};
 
 reg  [`FS_TO_DS_BUS_WD -1:0] fs_to_ds_bus_r;
 
 assign {ds_inst,
-        ds_pc  } = fs_to_ds_bus_r;
+        ds_pc } = fs_to_ds_bus_r;
 
 assign {rf_we   ,  //37:37
         rf_waddr,  //36:32
@@ -247,10 +298,11 @@ assign ds_to_es_bus = {alu_op       ,   // 12
                        rj_value     ,   // 32
                        rkd_value    ,   // 32
                        ds_pc        ,    // 32
-                       res_from_mem
+                       res_from_mem,
+                       ds_inst       // 32
                     };
 
-assign ds_ready_go    = 1'b1;
+assign ds_ready_go    = ~load_wait;   // 准备发送
 assign ds_allowin     = !ds_valid || ds_ready_go && es_allowin;
 assign ds_to_es_valid = ds_valid && ds_ready_go;
 always @(posedge clk) begin
@@ -260,11 +312,12 @@ always @(posedge clk) begin
     else if (ds_allowin) begin
         ds_valid <= fs_to_ds_valid;
     end
-
-    if (fs_to_ds_valid && ds_allowin) begin
+    if (fs_to_ds_valid && (ds_allowin)) begin
         fs_to_ds_bus_r <= fs_to_ds_bus;
     end
 end
 
+assign debug_id_rf_raddr1 = rf_raddr1;
+assign debug_id_rf_rdata1 = rf_rdata1;
 
 endmodule
