@@ -22,7 +22,12 @@ module mycpu_top(
     output [31:0] debug_wb_rf_wdata,
     output [31:0] debug_sram_rdata,
     output [ 4:0] debug_id_rf_raddr1,
-    output [31:0] debug_id_rf_rdata1
+    output [31:0] debug_id_rf_rdata1,
+    output [31:0] debug_wb_alu_src1,
+    output [31:0] debug_wb_alu_src2,
+    output        debug_src2_is_imm,
+    output [63:0] debug_m_axis_dout_data_s,
+    output        debug_div_complete
 );
 reg         reset;
 always @(posedge clk) reset <= ~resetn;
@@ -127,7 +132,8 @@ exe_stage exe_stage(
     .data_sram_addr (data_sram_addr ),
     .data_sram_wdata(data_sram_wdata),
     .ms_load_wait   (ms_load_wait   ),
-    .es_res_from_mem(es_res_from_mem)
+    .es_res_from_mem(es_res_from_mem),
+    .debug_es_div_complete(debug_div_complete)
 );
 // MEM stage
 mem_stage mem_stage(
@@ -167,7 +173,11 @@ wb_stage wb_stage(
     .debug_wb_rf_wnum (debug_wb_rf_wnum ),
     .debug_wb_rf_wdata(debug_wb_rf_wdata),
     .sram_rdata(inst_sram_rdata),
-    .debug_sram_rdata(debug_sram_rdata)
+    .debug_sram_rdata(debug_sram_rdata),
+    .debug_wb_alu_src1(debug_wb_alu_src1),
+    .debug_wb_alu_src2(debug_wb_alu_src2),
+    .debug_src2_is_imm(debug_src2_is_imm),
+    .debug_m_axis_dout_data_s(debug_m_axis_dout_data_s)
 );
 
 endmodule

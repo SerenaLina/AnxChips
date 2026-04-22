@@ -30,10 +30,15 @@ wire [ 4:0] ms_dest;
 wire [31:0] ms_alu_result;
 wire [31:0] ms_pc;
 wire        ms_load_wait;
+wire  [31:0]      ms_alusrc1;
+wire  [31:0]      ms_alusrc2;
+wire         ms_src2_is_imm;
+wire         ms_div_complete;
 
 wire [31:0] mem_result;
 wire [31:0] ms_final_result;
 wire  [31:0] ms_inst;
+wire  [63:0] ms_div_result;
 
 
 assign {ms_res_from_mem,  //70:70
@@ -41,14 +46,24 @@ assign {ms_res_from_mem,  //70:70
         ms_dest        ,  //68:64
         ms_alu_result  ,  //63:32
         ms_pc          ,  //31:0
-        ms_inst          // 32
+        ms_inst        ,  // 32
+        ms_alusrc1     ,  // 32
+        ms_alusrc2      , // 32
+        ms_src2_is_imm  ,// 1
+        ms_div_result   , // 64
+        ms_div_complete    // 1
        } = es_to_ms_bus_r;
 
 assign ms_to_ws_bus = {ms_gr_we       ,  //69:69
                        ms_dest        ,  //68:64
                        ms_final_result,  //63:32
                        ms_pc          ,   //31:0
-                        ms_inst          // 32
+                        ms_inst        ,
+                        ms_alusrc1     ,  // 32
+                        ms_alusrc2      , // 32
+                        ms_src2_is_imm  ,// 1
+                        ms_div_result    ,// 64
+                        ms_div_complete    // 1
                       };
 
 assign ms_ready_go    = 1'b1;
