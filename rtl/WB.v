@@ -18,7 +18,12 @@ module wb_stage(
     output [ 3:0] debug_wb_rf_we  ,
     output [ 4:0] debug_wb_rf_wnum,
     output [31:0] debug_wb_rf_wdata,
-    output [31:0] debug_sram_rdata
+    output [31:0] debug_sram_rdata,
+    output [31:0] debug_wb_alu_src1,
+    output [31:0] debug_wb_alu_src2,
+    output        debug_src2_is_imm,
+    output [63:0] debug_m_axis_dout_data_s,
+    output        debug_div_complete
 );
 
 reg         ws_valid;
@@ -30,11 +35,21 @@ wire [ 4:0] ws_dest;
 wire [31:0] ws_final_result;
 wire [31:0] ws_pc;
 wire  [31:0] ws_inst;
+wire  [31:0] ws_alusrc1;
+wire  [31:0] ws_alusrc2;
+wire       ws_src2_is_imm;
+wire  [63:0] ws_div_result;
+wire         ws_div_complete;
 assign {ws_gr_we       ,  //69:69
         ws_dest        ,  //68:64
         ws_final_result,  //63:32
         ws_pc          ,   //31:0
-        ws_inst          // 32
+        ws_inst        ,  // 32
+        ws_alusrc1     ,  // 32
+        ws_alusrc2      , // 32
+        ws_src2_is_imm  ,// 1
+        ws_div_result   , // 64
+        ws_div_complete    // 1
        } = ms_to_ws_bus_r;
 
 wire        rf_we;
@@ -69,10 +84,16 @@ assign ws_result = ws_final_result;
 
 // debug info generate
 assign debug_wb_pc       = ws_pc;
+
 assign debug_wb_rf_we    = {4{rf_we}};
 assign debug_wb_rf_wnum  = ws_dest;
 assign debug_wb_rf_wdata = ws_final_result;
 assign debug_sram_rdata  = ws_inst;
+assign debug_wb_alu_src1 = ws_alusrc1;
+assign debug_wb_alu_src2 = ws_alusrc2;
+assign debug_src2_is_imm = ws_src2_is_imm;
+assign debug_m_axis_dout_data_s = ws_div_result;
+assign debug_div_complete = ws_div_complete;
 
 
 endmodule
