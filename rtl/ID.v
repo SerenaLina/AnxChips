@@ -40,8 +40,9 @@ reg         ds_valid   ;
 wire        ds_ready_go;
 
 wire [27:0] alu_op;
+wire [4:0]  load_op;
+wire [2:0]  store_op;
 
-wire        load_op;
 wire        src1_is_pc;
 wire        src2_is_imm;
 wire        res_from_mem;
@@ -108,7 +109,17 @@ wire        inst_mulhwu;
 wire        inst_div;
 wire        inst_modw;
 wire        inst_divu;
-wire        inst_modwu; 
+wire        inst_modwu;
+wire        inst_blt;
+wire        inst_bge;
+wire        inst_bltu;
+wire        inst_bgeu;
+wire        inst_ldb;
+wire        inst_ldh;
+
+wire        inst_ldhu;
+wire        inst_stb;
+wire        inst_sth;
 
 wire        need_ui5;
 wire        need_si12;
@@ -200,13 +211,32 @@ assign inst_div     = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h2] & 
 assign inst_modw    = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h2] & op_19_15_d[5'h01];
 assign inst_divu    = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h2] & op_19_15_d[5'h02];
 assign inst_modwu   = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h2] & op_19_15_d[5'h03];
+assign inst_blt     = op_31_26_d[6'h18];
+assign inst_bge     = op_31_26_d[6'h19];
+assign inst_bltu    = op_31_26_d[6'h1a];
+assign inst_bgeu    = op_31_26_d[6'h1b];
+assign inst_ldb     = op_31_26_d[6'h0a] & op_25_22_d[4'h0];
+assign inst_ldh     = op_31_26_d[6'h0a] & op_25_22_d[4'h1];
+assign inst_ldbu    = op_31_26_d[6'h0a] & op_25_22_d[4'h8];
+assign inst_ldhu    = op_31_26_d[6'h0a] & op_25_22_d[4'h9];
+assign inst_stb     = op_31_26_d[6'h0a] & op_25_22_d[4'h4];
+assign inst_sth     = op_31_26_d[6'h0a] & op_25_22_d[4'h5];
 // ==============decode instruction
 
 
 // ==============decode operation
-assign load_op = inst_ld_w;
+assign load_op[0] = inst_ld_w;
+assign load_op[1] = inst_ldb;
+assign load_op[2] = inst_ldh;
+assign load_op[3] = inst_ldbu;
+assign load_op[4] = inst_ldhu;
+
+assign store_op[0] = inst_st_w;
+assign store_op[1] = inst_stb;
+assign store_op[2] = inst_sth;
+
 assign alu_op[ 0] = inst_add_w | inst_addi_w | inst_ld_w | inst_st_w
-                    | inst_jirl | inst_bl;
+                    | inst_jirl | inst_bl | inst_ldb | inst_ldh | inst_ldbu | inst_ldhu | inst_stb | inst_sth;
 assign alu_op[ 1] = inst_sub_w;
 assign alu_op[ 2] = inst_slt;
 assign alu_op[ 3] = inst_sltu;
@@ -239,8 +269,8 @@ assign alu_op[27] = inst_modwu;
 
  // ==============imm generation
 assign need_ui5   =  inst_slli_w | inst_srli_w | inst_srai_w;
-assign need_si12  =  inst_addi_w | inst_ld_w | inst_st_w | inst_slti | inst_sltui;
-assign need_si16  =  inst_jirl | inst_beq | inst_bne;
+assign need_si12  =  inst_addi_w | inst_ld_w | inst_st_w | inst_slti | inst_sltui | inst_ldb | inst_ldh | inst_ldbu | inst_ldhu | inst_stb | inst_sth;
+assign need_si16  =  inst_jirl | inst_beq | inst_bne | inst_blt | inst_bge | inst_bltu | inst_bgeu;
 assign need_si20  =  inst_lu12i_w | inst_pcaddu12i;
 assign need_si26  =  inst_b | inst_bl;
 assign need_ui12  =  inst_andi | inst_ori | inst_xori;
@@ -260,7 +290,7 @@ assign br_offs = need_si26 ? {{ 4{i26[25]}}, i26[25:0], 2'b0} :
 assign jirl_offs = {{14{i16[15]}}, i16[15:0], 2'b0};
 
 // ==============branch offset generation
-assign src_reg_is_rd = inst_beq | inst_bne | inst_st_w;
+assign src_reg_is_rd = inst_beq | inst_bne | inst_st_w | inst_stb | inst_sth | inst_blt | inst_bge | inst_bltu | inst_bgeu ;
 
 assign src1_is_pc    = inst_jirl | inst_bl | inst_pcaddu12i;
 
@@ -278,12 +308,18 @@ assign src2_is_imm   = inst_slli_w |
                        inst_sltui   |
                        inst_andi    |
                        inst_ori     |
-                       inst_xori    ;
+                       inst_xori    |
+                       inst_ldb     |
+                       inst_ldh     |
+                       inst_ldbu    |
+                       inst_ldhu    |
+                       inst_stb     |
+                       inst_sth;
 
-assign res_from_mem  = inst_ld_w;
+assign res_from_mem  = inst_ld_w | inst_ldb | inst_ldh | inst_ldbu | inst_ldhu;
 assign dst_is_r1     = inst_bl;
-assign gr_we         = ~inst_st_w & ~inst_beq & ~inst_bne & ~inst_b;
-assign mem_we        = inst_st_w;
+assign gr_we         = ~inst_st_w & ~inst_beq & ~inst_bne & ~inst_b & ~inst_stb & ~inst_sth & ~inst_blt & ~inst_bge & ~inst_bltu & ~inst_bgeu;
+assign mem_we        = inst_st_w | inst_stb | inst_sth;
 assign dest          = dst_is_r1 ? 5'd1 : rd;
 
 assign rf_raddr1 = rj;
@@ -303,8 +339,8 @@ assign rj_value  = rj_wait ? ((rj == es_to_ds_dest) ? es_result :
                               (rj == ms_to_ds_dest) ? ms_result : ws_result)
                             : rf_rdata1;
 assign rkd_value = rk_wait ? ((rk == es_to_ds_dest) ? es_result :
-                            (rk == ms_to_ds_dest) ? ms_result : ws_result) : 
-                   rd_wait ? ((rd == es_to_ds_dest) ? es_result :
+                            (rk == ms_to_ds_dest) ? ms_result : ws_result) :
+                   (rd_wait) ? ((rd == es_to_ds_dest) ? es_result :
                             (rd == ms_to_ds_dest) ? ms_result : ws_result) :
                    rf_rdata2;
 
@@ -314,18 +350,25 @@ assign br_taken = (   inst_beq  &&  rj_eq_rd
                    || inst_jirl
                    || inst_bl
                    || inst_b
+                   || inst_blt  && ($signed(rj_value) < $signed(rkd_value))
+                   || inst_bge  && ($signed(rj_value) >= $signed(rkd_value))
+                   || inst_bltu && (rj_value < rkd_value)
+                   || inst_bgeu && (rj_value >= rkd_value)
 )  && ds_valid && ~load_wait;
 wire br_cancel;
 assign br_cancel = br_taken;
-assign br_target = (inst_beq || inst_bne || inst_bl || inst_b) ? (ds_pc + br_offs) :
+assign br_target = (inst_beq || inst_bne || inst_bl || inst_b || inst_blt || inst_bge || inst_bltu || inst_bgeu) ? (ds_pc + br_offs) :
                                                    /*inst_jirl*/ (rj_value + jirl_offs);
 
 
 //  ==============data stall
-assign src_no_rj = (inst_b | inst_bl | inst_lu12i_w);
-assign src_no_rk    = inst_slli_w | inst_srli_w | inst_srai_w | inst_addi_w | inst_ld_w | inst_st_w | inst_jirl | 
-                      inst_b | inst_bl | inst_beq | inst_bne | inst_lu12i_w;
-assign src_no_rd    = ~inst_st_w & ~inst_beq & ~inst_bne;
+assign src_no_rj = (inst_b | inst_bl | inst_lu12i_w ) ? 1'b1 : 1'b0;
+assign src_no_rk    = inst_slli_w | inst_srli_w | inst_srai_w | inst_addi_w | 
+                      inst_ld_w | inst_ldb | inst_ldh | inst_ldbu | inst_ldhu |
+                      inst_st_w | inst_stb | inst_sth |
+                      inst_jirl | 
+                      inst_b | inst_bl | inst_beq | inst_bne | inst_lu12i_w | inst_blt | inst_bge | inst_bltu | inst_bgeu;
+assign src_no_rd    = ~inst_st_w & ~inst_stb & ~inst_sth & ~inst_beq & ~inst_bne & ~inst_blt & ~inst_bge & ~inst_bltu & ~inst_bgeu;
 assign rj_wait = ~src_no_rj && (rj != 5'b00000) 
             && ((rj == es_to_ds_dest)  
               || (rj == ms_to_ds_dest)    
@@ -338,9 +381,11 @@ assign rd_wait = ~src_no_rd && (rd != 5'b00000) && ((rd == es_to_ds_dest) || (rd
 assign no_wait = ~rj_wait && ~rk_wait && ~rd_wait;
 
 wire  load_wait = (rj == es_to_ds_dest) && es_res_from_mem ||
-                   (rk == es_to_ds_dest) && es_res_from_mem;
+                   (rk == es_to_ds_dest) && es_res_from_mem ||
+                   (rd == es_to_ds_dest) && es_res_from_mem;
 // ===============
 assign br_bus = {br_taken,br_target,br_cancel};
+
 
 reg  [`FS_TO_DS_BUS_WD -1:0] fs_to_ds_bus_r;
 
@@ -353,7 +398,8 @@ assign {rf_we   ,  //37:37
        } = ws_to_rf_bus;
 
 assign ds_to_es_bus = {alu_op       ,   // 28
-                       load_op      ,   // 1
+                       load_op      ,   // 5
+                        store_op,       //3
                        src1_is_pc   ,   // 1
                        src2_is_imm  ,   // 1
                        src2_is_4    ,   // 1
@@ -382,8 +428,8 @@ always @(posedge clk) begin
         fs_to_ds_bus_r <= fs_to_ds_bus;
     end
 end
-
 assign debug_id_rf_raddr1 = rf_raddr1;
 assign debug_id_rf_rdata1 = rf_rdata1;
 
 endmodule
+

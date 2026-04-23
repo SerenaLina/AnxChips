@@ -124,18 +124,6 @@ always @(posedge clk) begin
     end
 end
 
-// Debug: 打印除法相关信号
-always @(*) begin
-    if (op_div || op_divu) begin
-        $display("[DEBUG ALU] Time=%0t: op_div=%b, op_divu=%b, src1=%h, src2=%h",
-                 $time, op_div, op_divu, alu_src1, alu_src2);
-        $display("[DEBUG ALU] en_pulse_s=%b, en_pulse_u=%b, quotient_s=%h, quotient_u=%h",
-                 div_en_pulse_s, div_en_pulse_u, div_quotient_s, div_quotient_u);
-        $display("[DEBUG ALU] ready_s=%b, ready_u=%b, result_s_reg=%h, alu_result=%h",
-                 ready_s_wire, ready_u_wire, div_result_s_reg, alu_result);
-    end
-end
-
 wire [31:0] div_src1;
 wire [31:0] div_src2;
 

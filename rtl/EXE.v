@@ -33,7 +33,8 @@ wire        es_ready_go   ;
 reg  [`DS_TO_ES_BUS_WD -1:0] ds_to_es_bus_r;
 
 wire [27:0] alu_op      ;
-wire        es_load_op;
+wire  [4:0]      es_load_op;
+wire  [2:0] es_store_op;
 wire        src1_is_pc;
 wire        src2_is_imm;
 wire        src2_is_4;
@@ -50,9 +51,16 @@ wire [31:0] es_inst;
 wire [63:0] div_result;
 
 
+wire is_stw = es_store_op[0];
+wire is_stb = es_store_op[1];
+wire is_sth = es_store_op[2];
+wire [31:0] st_data;
+
+
 
 assign {alu_op,
         es_load_op,
+        es_store_op,
         src1_is_pc,
         src2_is_imm,
         src2_is_4,
@@ -76,7 +84,7 @@ wire        ready_u;
 
 // did't use in lab7
 wire        es_res_from_mem;
-assign es_res_from_mem = es_valid ? (es_load_op || ms_load_wait) : 1'b0; // only forward valid load_op to ID stage for data hazard detection
+assign es_res_from_mem = es_valid ? ((es_load_op[0] || es_load_op[1] || es_load_op[2] || es_load_op[3] || es_load_op[4]) || ms_load_wait) : 1'b0; // only forward valid load_op to ID stage for data hazard detection
 
 
 
@@ -85,12 +93,15 @@ assign es_to_ms_bus = {res_from_mem,  //70:70 1
                        dest        ,  //68:64 5
                        alu_result  ,  //63:32 32
                        es_pc,           //31:0
-                       es_inst     ,
+                       es_inst     , //32
                        alu_src1    ,  // 32
                        alu_src2    ,  // 32
                        src2_is_imm  ,// 1
                        div_result   , // 64
-                       div_complete    // 1
+                       div_complete  ,  // 1
+                       es_load_op     ,// 5
+                       es_store_op   , //3
+                       data_sram_addr  //32
                       };
 
 assign es_ready_go    = (es_valid && (alu_op[24] || alu_op[25] || alu_op[26] || alu_op[27])) ? div_complete : 1'b1; 
@@ -137,16 +148,25 @@ alu u_alu(
     .ready_u(ready_u),
     .clk(clk)
     );
-
+wire [31:0] st_data_byte;
+wire [31:0] st_data_half;
+assign st_data_byte = is_stb ? (rkd_value[7:0]  << (alu_result[1:0] * 8)) : 32'b0;
+assign st_data_half = is_sth ? (rkd_value[15:0] << (alu_result[1] * 16)) : 32'b0;
+assign st_data = st_data_byte | st_data_half | (is_stw ? rkd_value : 32'b0);
 assign data_sram_en    = 1'b1;
-assign data_sram_we    = es_mem_we && es_valid ? 4'hf : 4'h0;
 assign data_sram_addr  = alu_result;
-assign data_sram_wdata = rkd_value;
+wire [3:0] st_we;
+assign st_we = is_stb ? (4'b0001 << alu_result[1:0]) :
+               is_sth ? (alu_result[1] ? 4'b1100 : 4'b0011) :
+               4'b1111;
+assign data_sram_we    = es_mem_we && es_valid ? st_we : 4'b0000;
+assign data_sram_wdata = st_data;
 
 
 assign es_to_ds_dest = (es_valid && gr_we) ? dest : 5'b0; // only forward valid dest to ID stage for data hazard detection
 assign es_result     = alu_result;
 assign debug_es_div_complete = div_complete;
+
 assign div_result = 64'b0;
 
 

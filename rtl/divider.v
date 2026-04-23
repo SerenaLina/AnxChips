@@ -250,15 +250,4 @@ module divider(
             endcase
     end
 
-// Debug: 打印divider状态机信息
-always @(posedge clk) begin
-    if (en || (div_state != DIV_IDLE)) begin
-        $display("[DEBUG DIV] Time=%0t: state=%d, en=%b, ready=%b, quotient=%h, remainder=%h",
-                 $time, div_state, en, ready, quotient, remainder);
-        $display("[DEBUG DIV] dividend=%h, divisor=%h, sign=%b, shift_count=%d",
-                 dividend, divisor, sign, shift_count);
-    end
-end
-
-
 endmodule

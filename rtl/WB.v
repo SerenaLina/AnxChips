@@ -84,6 +84,7 @@ assign ws_result = ws_final_result;
 
 // debug info generate
 assign debug_wb_pc       = ws_pc;
+
 assign debug_wb_rf_we    = {4{rf_we}};
 assign debug_wb_rf_wnum  = ws_dest;
 assign debug_wb_rf_wdata = ws_final_result;

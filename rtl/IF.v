@@ -56,7 +56,7 @@ end
 
 always @(posedge clk) begin
     if (reset) begin
-        fs_pc <= 32'h1bfffffc;     //trick: to make nextpc be 0x1c000000 during reset 
+        fs_pc <= 32'h1bfffffc;     //trick: to make nextpc be 0x1c000000 during reset
     end
     else if ((to_fs_valid && fs_allowin) || br_cancel) begin
         fs_pc <= nextpc;
