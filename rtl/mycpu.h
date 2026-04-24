@@ -7,4 +7,7 @@
     `define ES_TO_MS_BUS_WD 273
     `define MS_TO_WS_BUS_WD 232
     `define WS_TO_RF_BUS_WD 135
+    
+    // Instruction bus width: 46 instructions
+    `define INST_BUS_WD     46
 `endif
