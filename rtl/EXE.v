@@ -29,6 +29,7 @@ module exe_stage(
 
 reg         es_valid      ;
 wire        es_ready_go   ;
+wire        div_complete  ;
 
 reg  [`DS_TO_ES_BUS_WD -1:0] ds_to_es_bus_r;
 
@@ -82,7 +83,6 @@ wire        ready_s;
 wire        ready_u;
 
 
-// did't use in lab7
 wire        es_res_from_mem;
 assign es_res_from_mem = es_valid ? ((es_load_op[0] || es_load_op[1] || es_load_op[2] || es_load_op[3] || es_load_op[4]) || ms_load_wait) : 1'b0; // only forward valid load_op to ID stage for data hazard detection
 
@@ -104,24 +104,22 @@ assign es_to_ms_bus = {res_from_mem,  //70:70 1
                        data_sram_addr  //32
                       };
 
-assign es_ready_go    = (es_valid && (alu_op[24] || alu_op[25] || alu_op[26] || alu_op[27])) ? div_complete : 1'b1; 
-assign es_allowin     = !es_valid || (es_ready_go && ms_allowin); 
-assign es_to_ms_valid =  es_valid && es_ready_go;
-reg div_complete;
-always @(posedge clk) begin
-    if (reset) begin
-        div_complete <= 1'b0;
-    end 
-    else if (es_allowin && (alu_op[24] || alu_op[25] || alu_op[26] || alu_op[27])) begin
-        div_complete <= 1'b0; 
-    end
-    else if ((alu_op[24] || alu_op[25]) && ready_s) begin
-        div_complete <= 1'b1;
-    end
-    else if ((alu_op[26] || alu_op[27]) && ready_u) begin
-        div_complete <= 1'b1;
-    end
-end
+// ============== exe_staller module instance
+exe_staller u_exe_staller(
+    .clk                    (clk                    ),
+    .reset                  (reset                  ),
+    .es_valid               (es_valid               ),
+    .alu_op                 (alu_op                 ),
+    .ready_s                (ready_s                ),
+    .ready_u                (ready_u                ),
+    .ms_allowin             (ms_allowin             ),
+    .ds_to_es_valid         (ds_to_es_valid         ),
+    .div_complete           (div_complete           ),
+    .es_ready_go            (es_ready_go            ),
+    .es_allowin             (es_allowin             ),
+    .es_to_ms_valid         (es_to_ms_valid         ),
+    .debug_es_div_complete  (debug_es_div_complete  )
+);
 always @(posedge clk) begin
     if (reset) begin
         es_valid <= 1'b0;
@@ -165,7 +163,6 @@ assign data_sram_wdata = st_data;
 
 assign es_to_ds_dest = (es_valid && gr_we) ? dest : 5'b0; // only forward valid dest to ID stage for data hazard detection
 assign es_result     = alu_result;
-assign debug_es_div_complete = div_complete;
 
 assign div_result = 64'b0;
 
