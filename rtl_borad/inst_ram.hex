@@ -1,0 +1,26 @@
+// Test program for interrupt handler verification
+// Address:    Instruction:    Comment:
+// 0x1c000000: 03400000        nop (add.w $r0, $r0, $r0)
+// 0x1c000004: 03400000        nop
+// 0x1c000008: 03400000        nop
+// ...
+
+// Normal aligned instructions at reset vector
+03400000  // nop at 0x1c000000
+03400000  // nop at 0x1c000004
+03400000  // nop at 0x1c000008
+03400000  // nop at 0x1c00000c
+03400000  // nop at 0x1c000010
+03400000  // nop at 0x1c000014
+03400000  // nop at 0x1c000018
+03400000  // nop at 0x1c00001c
+
+// Fill rest with nops
+03400000
+03400000
+03400000
+03400000
+03400000
+03400000
+03400000
+03400000

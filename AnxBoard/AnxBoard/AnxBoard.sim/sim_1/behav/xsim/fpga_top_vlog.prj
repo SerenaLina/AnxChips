@@ -1,0 +1,33 @@
+# compile verilog/system verilog design source files
+verilog xil_defaultlib  --include "../../../../../../rtl_borad" \
+"../../../../../../rtl_borad/EXE.v" \
+"../../../../../../rtl_borad/ID.v" \
+"../../../../../../rtl_borad/IF.v" \
+"../../../../../../rtl_borad/MEM.v" \
+"../../../../../../rtl_borad/WB.v" \
+"../../../../../../rtl_borad/alu.v" \
+"../../../../../../rtl_borad/branch.v" \
+"../../../../../../rtl_borad/clog2.v" \
+"../../../../../../rtl_borad/controller.v" \
+"../../../../../../rtl_borad/data_ram.v" \
+"../../../../../../rtl_borad/decoder_2_4.v" \
+"../../../../../../rtl_borad/decoder_4_16.v" \
+"../../../../../../rtl_borad/decoder_5_32.v" \
+"../../../../../../rtl_borad/decoder_6_64.v" \
+"../../../../../../rtl_borad/divider.v" \
+"../../../../../../rtl_borad/exe_staller.v" \
+"../../../../../../rtl_borad/forward.v" \
+"../../../../../../rtl_borad/imm.v" \
+"../../../../../../rtl_borad/inst_decode.v" \
+"../../../../../../rtl_borad/inst_ram.v" \
+"../../../../../../rtl_borad/mycpu_top.v" \
+"../../../../../../rtl_borad/op_decode.v" \
+"../../../../../../rtl_borad/regfile.v" \
+"../../../../../../rtl_borad/staller.v" \
+"../../../../../../rtl_borad/fpga_top.v" \
+
+# compile glbl module
+verilog xil_defaultlib "glbl.v"
+
+# Do not sort compile order
+nosort
