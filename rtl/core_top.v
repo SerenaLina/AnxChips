@@ -1,6 +1,7 @@
-module mycpu_top(
+module core_top(
     input  wire        aclk,
     input  wire        aresetn,  // low active
+
 
     // AXI Read Address Channel
     output wire [3:0]  arid,
@@ -14,7 +15,7 @@ module mycpu_top(
     output wire        arvalid,
     input  wire        arready,
 
-    input wire [7:0] ext_int,
+    input wire [7:0] intrpt,
 
     // AXI Read Data Channel
     input  wire [3:0]  rid,
@@ -49,12 +50,17 @@ module mycpu_top(
     input  wire [1:0]  bresp,
     input  wire        bvalid,
     output wire        bready,
-
+    //debug
+    input           break_point,//无需实现功能，仅提供接口即可，输入1’b0
+    input           infor_flag,//无需实现功能，仅提供接口即可，输入1’b0
+    input  [ 4:0]   reg_num,//无需实现功能，仅提供接口即可，输入5’b0
+    output          ws_valid,//无需实现功能，仅提供接口即可
+    output [31:0]   rf_rdata,//无需实现功能，仅提供接口即可
     // trace debug interface
-    output wire [31:0] debug_wb_pc,
-    output wire [ 3:0] debug_wb_rf_we,
-    output wire [ 4:0] debug_wb_rf_wnum,
-    output wire [31:0] debug_wb_rf_wdata
+    output wire [31:0] debug0_wb_pc,
+    output wire [ 3:0] debug0_wb_rf_wen,
+    output wire [ 4:0] debug0_wb_rf_wnum,
+    output wire [31:0] debug0_wb_rf_wdata
 );
     wire        inst_sram_req;
     wire        inst_sram_wr;
@@ -83,7 +89,10 @@ module mycpu_top(
     assign inst_sram_size=2'd2;
     assign inst_sram_wdata=32'b0;
     assign inst_sram_wstrb=4'b0;
-    assign inst_sram_req= if_allow_in & inst_req_valid & pc_inst_en & (~pipline_is_not_stalled===1'b0) & (!(inst_tlb_or_csr_we === 1'b1));
+    // pipeline_is_stalled_from_tlb_csr prevents deadlock when tlb_csr_we flag
+    // persists in drained pipeline registers after the CSR/TLB instruction has retired
+    wire pipeline_drained_except_if = (id_pc == 32'b0) && (exe_pc == 32'b0) && (mem_pc == 32'b0);
+    assign inst_sram_req= if_allow_in & inst_req_valid & pc_inst_en & (~pipline_is_not_stalled===1'b0) & (!(inst_tlb_or_csr_we === 1'b1) | pipeline_drained_except_if);
 
     wire if_allow_in;
     wire id_allow_in;
@@ -291,7 +300,8 @@ module mycpu_top(
         .csr_estat_is(csr_estat_is),
         .csr_ecfg_lie(csr_ecfg_lie),
         .csr_crmd_ie(csr_crmd_ie),
-        .int_has_int(int_has_int),
+        .ext_intrpt(intrpt),
+        .int_has_int(int_has_int),         //来自interrupt.v的中断标记
         .int_ecode(int_ecode),
         .int_esubcode(int_esubcode)
     );
@@ -1058,10 +1068,10 @@ module mycpu_top(
 
     assign id_src1=rf_rdata1;
     assign id_src2=rf_rdata2;
-    assign debug_wb_pc = wb_pc;
-    assign debug_wb_rf_we ={4{rf_we}};
-    assign debug_wb_rf_wnum=wb_rd;
-    assign debug_wb_rf_wdata=rf_wdata;
+    assign debug0_wb_pc = wb_pc;
+    assign debug0_wb_rf_wen ={4{rf_we}};
+    assign debug0_wb_rf_wnum=wb_rd;
+    assign debug0_wb_rf_wdata=rf_wdata;
 
 
     //assign if_allow_in = inst_sram_data_ok==1'b0;
