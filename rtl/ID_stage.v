@@ -163,6 +163,7 @@ module ID_stage(
     wire        inst_tlbwr;    // TLB写指�?
     wire        inst_tlbfill;  // TLB填充指令
     wire        inst_invtlb;   // TLB无效化指�?
+    wire        inst_cpucfg;   // CPUCFG指令
 
 
     // 指令字段提取
@@ -260,6 +261,7 @@ module ID_stage(
     assign inst_rdcntvl_w = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h0] & op_19_15_d[5'h00] & op_14_10_d[5'h18] & op_9_5_d[5'h00]; // rdcntvl.w
     assign inst_rdcntvh_w = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h0] & op_19_15_d[5'h00] & op_14_10_d[5'h19] & op_9_5_d[5'h00]; // rdcntvh.w
     assign inst_rdcntid   = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h0] & op_19_15_d[5'h00] & op_14_10_d[5'h18] & op_4_0_d[5'h00]; // rdcntid
+    assign inst_cpucfg     = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h0] & op_19_15_d[5'h00] & op_14_10_d[5'h1B]; // cpucfg
     // 新增系统指令解码
     assign inst_syscall = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h2] & op_19_15_d[5'h16]; // syscall
     assign inst_break = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h2] & op_19_15_d[5'h14]; // break
@@ -319,6 +321,7 @@ assign id_alu_op =
                     inst_ld_b | inst_ld_h | inst_ld_bu | inst_ld_hu |
                     // 新增指令
                     inst_rdcntvl_w | inst_rdcntvh_w | inst_rdcntid |
+                    inst_cpucfg |
                     inst_csrrd | inst_csrwr | inst_csrxchg) && id_ex_adef!=1'b1 ;
 
     // 存储器访问控制（保持不变�?
@@ -327,11 +330,12 @@ assign id_alu_op =
     assign id_res_from_dram = inst_ld_w | inst_ld_b | inst_ld_h | inst_ld_bu | inst_ld_hu;
     // 新增结果来源选择
     assign id_res_from_csr = inst_csrrd | inst_csrwr | inst_csrxchg;
-    assign id_res_from_cnt = inst_rdcntvl_w | inst_rdcntvh_w ;
+    assign id_res_from_cnt = inst_rdcntvl_w | inst_rdcntvh_w | inst_cpucfg;
     assign id_res_from_tid = inst_rdcntid;
     // 计数器结果�?�择
     assign id_res_of_cnt = inst_rdcntvl_w ? csr_timer_64[31:0] :
                           inst_rdcntvh_w ? csr_timer_64[63:32] :
+                          inst_cpucfg ? 32'h0 :
                           32'b0;
 
     assign id_res_is_rj = 0;  // 只有rdcntid使用rj作为目标
@@ -387,6 +391,7 @@ assign id_alu_op =
                         inst_ld_b | inst_ld_h | inst_ld_bu | inst_ld_hu | 
                         inst_st_b | inst_st_h |
                         inst_csrxchg |
+                        inst_cpucfg |
                         inst_invtlb;  // �?要读取rj寄存�?
 
     assign id_src2_from_ref = inst_add_w | inst_sub_w | inst_lu12i_w | inst_slt | inst_sltu |
@@ -447,7 +452,9 @@ assign id_alu_op =
     // CSR指令
     inst_csrrd | inst_csrwr | inst_csrxchg | inst_ertn |    
     // 计数器指�?
-    inst_rdcntvl_w | inst_rdcntvh_w | inst_rdcntid |    
+    inst_rdcntvl_w | inst_rdcntvh_w | inst_rdcntid |
+    // CPUCFG指�?
+    inst_cpucfg |
     // 系统指令
     inst_syscall | inst_break|
     // TLB指令
