@@ -44,7 +44,7 @@ module IF_readygo_state (
                 end
                 else
                 begin
-                    st_next <= notreadygo;
+                    st_next = notreadygo;
                 end
         endcase
     end

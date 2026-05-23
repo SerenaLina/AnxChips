@@ -1,9 +1,9 @@
-module ID_readygo_state (
+module EXE2_readygo_state (
     input wire clk,
     input wire rst,
-    input wire exe_allow_in,
-    input wire id_ready_go,
-    output wire ID_ready_go
+    input wire mem_allow_in,
+    input wire exe2_ready_go,
+    output wire EXE2_ready_go
 );
     parameter readygo = 1'b1;
     parameter notreadygo = 1'b0;
@@ -28,17 +28,17 @@ module ID_readygo_state (
         case (st_cur)
             readygo:
             begin
-                if(exe_allow_in)
+                if(mem_allow_in)
                 begin
                     st_next = notreadygo;
                 end
-                else 
+                else
                 begin
                     st_next = readygo;
                 end
-            end 
+            end
             notreadygo:
-                if(id_ready_go===1'b1 && exe_allow_in==1'b0)
+                if(exe2_ready_go===1'b1 && mem_allow_in==1'b0)
                 begin
                     st_next = readygo;
                 end
@@ -49,5 +49,5 @@ module ID_readygo_state (
         endcase
     end
 
-    assign ID_ready_go = st_cur;
+    assign EXE2_ready_go = st_cur;
 endmodule

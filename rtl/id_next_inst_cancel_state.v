@@ -4,6 +4,7 @@ module id_next_inst_cancel (
     input if_ready_go,
     input id_allow_in,
     input id_br_taken,
+    input id_is_ertn,
     input pre_if_ready_go,
     input if_allow_in,
     output id_next_inst_cancel
@@ -32,15 +33,8 @@ module id_next_inst_cancel (
         case (st_cur)
             not_need_cancel:
             begin
-                if(id_br_taken===1'b1 && !(pre_if_ready_go===1'b0)&& if_allow_in)
-                begin
-                    st_next = need_cancel;
-                end
-                else
-                begin
-                    st_next =not_need_cancel;
-                end
-            end 
+                st_next = not_need_cancel;
+            end
             need_cancel:
             begin
                 if(id_allow_in && !(if_ready_go===1'b0))
@@ -54,5 +48,6 @@ module id_next_inst_cancel (
             end
         endcase
     end
+    // Registered.
     assign id_next_inst_cancel = st_cur;
 endmodule

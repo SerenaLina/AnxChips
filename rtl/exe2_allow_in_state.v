@@ -1,10 +1,11 @@
-module id_allow_in_state (
+module exe2_allow_in_state (
     input wire clk,
     input wire rst,
-    input wire if_ready_go,
     input wire id_ready_go,
-    input wire exe_allow_in,
-    output wire id_allow_in
+    input wire exe_ready_go,
+    input wire mem_allow_in,
+    input wire wb_ex,
+    output wire exe_allow_in
 );
     parameter            allow_in   = 1'd1 ;
     parameter            not_allow_in  = 1'd0 ;
@@ -28,7 +29,7 @@ module id_allow_in_state (
     begin
         case(st_cur)
             allow_in :
-                if(if_ready_go===1'b0 || (!(if_ready_go===1'b0)&& !(id_ready_go===1'b0) &&exe_allow_in==1'b1))
+                if(id_ready_go===1'b0 || (!(id_ready_go===1'b0)&& !(exe_ready_go===1'b0) &&mem_allow_in==1'b1))
                 begin
                     st_next  = allow_in;
                 end
@@ -37,7 +38,7 @@ module id_allow_in_state (
                     st_next  = not_allow_in;
                 end
             not_allow_in:
-                if( !(id_ready_go===1'b0)&&exe_allow_in==1'b1)
+                if((!(exe_ready_go===1'b0)&&mem_allow_in==1'b1)||wb_ex===1'b1)
                 begin
                     st_next = allow_in;
                 end
@@ -48,5 +49,5 @@ module id_allow_in_state (
         endcase
     end
 
-    assign id_allow_in = st_cur;
+    assign exe_allow_in = st_cur;
 endmodule

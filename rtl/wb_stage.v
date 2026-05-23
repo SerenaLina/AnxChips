@@ -30,7 +30,7 @@ module Wb_stage(
 
     always @(*) begin
         wb_ex = wb_need_cancel==1'b0 &&(wb_has_int===1'b1 || wb_ex_adef===1'b1 || wb_ex_ale===1'b1 || wb_is_syscall===1'b1 || wb_ex_brk===1'b1 || wb_ex_ine===1'b1 || wb_is_ertn ===1'b1 || wb_data_tlb_ex != 3'b0 || wb_inst_tlb_ex != 2'b0);
-        
+
         // （中断 > ADEF > ALE > 系统调用 > 断点 > 指令不存在）
         if ((wb_is_ertn===1'b0||wb_is_ertn===1'bx) && wb_has_int===1'b1)
             wb_ecode = INT;

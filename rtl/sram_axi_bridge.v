@@ -312,14 +312,45 @@ module axi_bridge (
         endcase
     end
 
-    //inst_sram
-    assign inst_sram_addr_ok = arready && arid==4'b0 && cur_reading == 1'b0;
-    assign inst_sram_data_ok = rvalid===1'b1 && rid==4'b0;
-    assign inst_sram_rdata = rid==4'b0 ? rdata :32'b0;
+    // DEBUG: track AXI AR handshake
+    always @(posedge aclk) begin
+        if (aresetn && arvalid && arready)
+            $display("[AXI-AR] %0t: araddr=%h arid=%h arsize=%d read_state=%d",
+                $time, araddr, arid, arsize, read_cur_state);
+    end
+    // DEBUG: track AXI R response
+    always @(posedge aclk) begin
+        if (aresetn && rvalid && rready)
+            $display("[AXI-R]  %0t: rdata=%h rid=%h",
+                $time, rdata, rid);
+    end
 
-    //data_sram
-    assign data_sram_addr_ok = (data_sram_wr == 1'b0 && arready && arid==4'b1 && cur_reading == 1'b1)||(data_sram_wr== 1'b1 && write_next_state==write_waiting_success) ;
-    assign data_sram_data_ok = (rvalid===1'b1 && rid==4'b1) || (bvalid&&bready && write_cur_state == write_waiting_success); 
-    assign data_sram_rdata  =  rid==1'b1 ? rdata :32'b0;
+    // Buffer AXI read response to filter spurious rvalid beats
+    reg         r_buf_rvalid;
+    reg [3:0]   r_buf_rid;
+    reg [31:0]  r_buf_rdata;
+    always @(posedge aclk) begin
+        if(!aresetn) r_buf_rvalid <= 0;
+        else r_buf_rvalid <= rvalid;
+    end
+    always @(posedge aclk) begin
+        if(!aresetn) r_buf_rid <= 0;
+        else r_buf_rid <= rid;
+    end
+    always @(posedge aclk) begin
+        if(!aresetn) r_buf_rdata <= 0;
+        else r_buf_rdata <= rdata;
+    end
+
+    //inst_sram — use buffered response
+    assign inst_sram_addr_ok = arvalid && arready && arid==4'b0 && cur_reading == 1'b0;
+    assign inst_sram_data_ok = r_buf_rvalid && r_buf_rid == 4'b0;
+    assign inst_sram_rdata = r_buf_rid == 4'b0 ? r_buf_rdata : 32'b0;
+
+    //data_sram — use buffered response
+    assign data_sram_addr_ok = (data_sram_wr == 1'b0 && arvalid && arready && arid==4'b1 && cur_reading == 1'b1)
+                           ||(data_sram_wr== 1'b1 && write_next_state==write_waiting_success);
+    assign data_sram_data_ok = (r_buf_rvalid && r_buf_rid == 4'b1) || (bvalid&&bready && write_cur_state == write_waiting_success);
+    assign data_sram_rdata  =  r_buf_rid == 4'b1 ? r_buf_rdata : 32'b0;
 
 endmodule

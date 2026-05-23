@@ -2,7 +2,7 @@ module trap_unit (
     input wire        clk,
     input wire        rst,
     
-    // WB阶段输入的所有异常标�?
+    // WB阶段输入的所有异常标�?
     input wire        wb_has_int,
     input wire [5:0]  wb_int_ecode,
     input wire [7:0]  wb_int_esubcode,
@@ -17,14 +17,14 @@ module trap_unit (
     input wire        wb_need_cancel,
     
     // 输出
-    output reg        trap_ex_valid,      // 有异常发�?
-    output reg [5:0]  trap_ecode,         // �?终ecode
-    output reg [7:0]  trap_esubcode,      // �?终esubcode
-    output wire       trap_flush,         // 冲刷流水�?
+    output reg        trap_ex_valid,      // 有异常发�?
+    output reg [5:0]  trap_ecode,         // �?终ecode
+    output reg [7:0]  trap_esubcode,      // �?终esubcode
+    output wire       trap_flush,         // 冲刷流水�?
     output wire       trap_ertn           // 是否是ertn指令
 );
 
-    // LoongArch 异常优先�? (从高到低)
+    // LoongArch 异常优先�? (从高到低)
     localparam INT  = 6'h00;
     localparam TLBR = 6'h3F;
     localparam PIL  = 6'h01;
@@ -38,20 +38,17 @@ module trap_unit (
     localparam BRK  = 6'h0C;
     localparam INE  = 6'h0D;
 
-    // 优先级仲�?
+    // 优先级仲�?
     always @(*) begin
         trap_ex_valid  = 1'b0;
         trap_ecode     = 6'h00;
         trap_esubcode  = 8'h00;
-        
-        // 注意：ertn指令也会置位trap_ex_valid，但ecode保持�?0
-        // 这是为了兼容原Wb_stage的行�?
-        // 当wb_need_cancel=1时，不触发异常（与原Wb_stage�?致）
-        if (!wb_need_cancel && wb_is_ertn) begin
-            trap_ex_valid = 1'b1;  // ertn也视为一�?"异常"来触发CSR更新和跳�?
-        end
-        else if (!wb_need_cancel) begin
-            // 按优先级判断
+
+        // 注意：ertn指令也会置位trap_ex_valid，但ecode保持�?0
+        // 这是为了兼容原Wb_stage的行�?
+        // 当wb_need_cancel=1时，不触发异常（与原Wb_stage�?致）
+        // ertn is NOT an exception — it is handled by wb_is_ertn separately
+        if (!wb_need_cancel && !wb_is_ertn) begin
             if (wb_has_int) begin
                 trap_ex_valid = 1'b1;
                 trap_ecode    = wb_int_ecode;

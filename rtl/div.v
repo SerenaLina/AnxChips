@@ -4,7 +4,8 @@ module Div(
     input div_signed,
     input [31:0] x, y,
     output [31:0] s, r,
-    output complete
+    output complete,
+    output div_done
     );
 
 reg [32:0] UnsignS;
@@ -15,7 +16,7 @@ wire [32:0] tmp_d;
 wire [32:0] result_r;
 wire [32:0] UnsignX, UnsignY;
 
-reg  div_signed_buffer; 
+reg  div_signed_buffer;
 reg  x_31_buffer;
 reg  y_31_buffer;
 wire real_div_signed;
@@ -27,13 +28,13 @@ wire real_complete;
 assign complete_delay = (count == 8'hf0);
 assign real_complete = complete_delay || complete;
 
-always @(posedge div_clk) begin 
-    if (reset) begin 
+always @(posedge div_clk) begin
+    if (reset) begin
         div_signed_buffer <= 1'b0;
         x_31_buffer <= 1'b0;
         y_31_buffer <= 1'b0;
-    end 
-    else if (div) begin 
+    end
+    else if (div) begin
         div_signed_buffer <= div_signed;   //when div inst go to ms, div_signed will be changed. so buffer it.
         x_31_buffer <= x[31];
         y_31_buffer <= y[31];
@@ -62,7 +63,7 @@ always @(posedge div_clk) begin  //33位除法计算
         if (tmp_d[32]) begin    //tmp_d为负数
             UnsignS <= {UnsignS[31:0], 1'b0};
             tmp_r <= result_r;
-        end 
+        end
         else begin
             UnsignS <= {UnsignS[31:0], 1'b1};
             tmp_r <= tmp_d;
@@ -77,6 +78,7 @@ always @(posedge div_clk) begin  //33位除法计算
 end
 
 assign complete = (count == 8'hff);//chenji
+assign div_done = complete_delay;
 
 assign result_r = {tmp_r[31:0], UnsignX[count]};
 assign tmp_d = result_r - UnsignY;
@@ -85,7 +87,12 @@ wire [32:0] TmpS, TmpR;
 assign TmpS = (real_div_signed ? ((real_x_31 == real_y_31) ? UnsignS : ~(UnsignS - 1)) : UnsignS); //去绝对值并截位
 assign TmpR = (real_div_signed ? (real_x_31 ? ~(UnsignR - 1) : UnsignR) : UnsignR);
 
+reg [32:0] final_TmpR;
+always @(posedge div_clk) begin
+    if (complete_delay)
+        final_TmpR <= TmpR;
+end
 assign s = TmpS[31:0];
-assign r = TmpR[31:0];
+assign r = (complete || complete_delay) ? TmpR[31:0] : final_TmpR[31:0];
 
 endmodule

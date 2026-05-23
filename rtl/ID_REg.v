@@ -7,6 +7,7 @@ module ID_Reg (
     input wire exe_data_ram_req,
     input wire exe_data_ram_addr_ok,
     input wire wb_is_ertn,
+    input wire mem_is_ertn,
     input wire [31:0] if_pc,
     input wire [31:0] if_inst,
     input wire wb_ex,
@@ -31,7 +32,8 @@ module ID_Reg (
     
     wire [31:0]if_to_id_inst;
     reg [31:0] if_to_id_inst_memory;
-    reg if_to_id_memory;
+    reg        if_to_id_need_cancel_memory;  // buffered cancel flag
+    reg        if_to_id_memory;
     wire [1:0] If_inst_tlb_ex;
     assign If_inst_tlb_ex = if_inst_tlb_ex & {2{id_need_cancel==2'b0}};
 
@@ -40,22 +42,29 @@ module ID_Reg (
         if(rst)
         begin
             if_to_id_inst_memory <= 32'b0;
+            if_to_id_need_cancel_memory <= 1'b0;
             if_to_id_memory <= 1'b0;
         end
         else if((!(if_ready_go===1'b0)&&id_allow_in) || wb_ex === 1'b1 )
         begin
             if_to_id_memory <= 1'b0 ;
         end
-        else if(!(if_ready_go===1'b0) && id_allow_in==1'b0 && if_to_id_memory==1'b0)
+        else if(!(if_ready_go===1'b0) && id_allow_in==1'b0 && if_to_id_memory==1'b0 && (id_need_cancel == 2'b00))
         begin
             if_to_id_inst_memory <= if_to_id_inst;
+            if_to_id_need_cancel_memory <= (id_need_cancel != 2'b0);
             if_to_id_memory <= 1'b1;
         end
     end
 
-    assign if_to_id_inst = (id_need_cancel!=2'b0) ? 32'h02800000 : if_inst; 
+    // Only STATE_NOT_NORMAL_two (2) cancels; STATE_NOT_NORMAL_one (1) lets target pass.
+    assign if_to_id_inst = (id_need_cancel == 2'b10) ? 32'h02800000 : if_inst;
+
+    // Effective cancel flag: state=2 only
+    wire id_need_cancel_eff;
+    assign id_need_cancel_eff = if_to_id_memory ? if_to_id_need_cancel_memory : (id_need_cancel == 2'b10);
     always @(posedge clk) begin
-    if (rst || wb_ex===1'b1||wb_is_ertn===1'b1) begin
+    if (rst || wb_ex===1'b1||wb_is_ertn===1'b1||mem_is_ertn===1'b1) begin
         id_pc   <= 32'h1bfffffc;
         id_inst <= 32'h0;
         ID_need_cancel <= 1'b0;
@@ -70,7 +79,7 @@ module ID_Reg (
                 id_pc   <= if_pc;
                 id_inst <= id_inst_cancel? 32'h02800000:
                            if_to_id_memory ? if_to_id_inst_memory : if_to_id_inst;
-                ID_need_cancel <= id_need_cancel!=2'b0;
+                ID_need_cancel <= id_need_cancel_eff;
                 id_inst_tlb_ex <= If_inst_tlb_ex;
                 id_has_int <= int_has_int;
                 id_int_ecode <= int_ecode;
@@ -132,7 +141,7 @@ module ID_Reg (
                 id_pc   <= if_pc;
                 id_inst <= id_inst_cancel? 32'h02800000:
                            if_to_id_memory ? if_to_id_inst_memory : if_to_id_inst;
-                ID_need_cancel <= id_need_cancel!=2'b0;
+                ID_need_cancel <= id_need_cancel_eff;
                 id_inst_tlb_ex <= If_inst_tlb_ex;
                 id_has_int <= int_has_int;
                 id_int_ecode <= int_ecode;

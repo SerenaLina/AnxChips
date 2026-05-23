@@ -14,6 +14,7 @@ module Wb_reg (
     input wire [31:0] mem_dram_waddr,
     input wire mem_dram_we,
     input wire [31:0] mem_pc,
+    input wire [1:0]mem_wdram_num,
     input wire [1:0]mem_rdram_num,
     input wire mem_rdram_need_signed_extend,
     input wire mem_rdram_need_zero_extend,
@@ -52,7 +53,8 @@ module Wb_reg (
     input wire mem_tlb_or_csr_we,
     input wire [1:0] mem_inst_tlb_ex,
     input wire [2:0] mem_data_tlb_ex,
-    
+    input wire [31:0] mem_inst,
+
     //input wire [31:0]mem_dram_rdata,
     //input wire [31:0] mem_csr_rdata,
 
@@ -67,6 +69,7 @@ module Wb_reg (
     output reg [31:0] wb_dram_wdata,
     output reg wb_dram_we,
     output reg [31:0] wb_pc,
+    output reg [1:0]wb_wdram_num,
     output reg [1:0]wb_rdram_num,
     output reg wb_rdram_need_signed_extend,
     output reg wb_rdram_need_zero_extend ,
@@ -104,12 +107,14 @@ module Wb_reg (
     output reg wb_invtlb_valid,
     output reg wb_tlb_or_csr_we,
     output reg [1:0] wb_inst_tlb_ex,
-    output reg [2:0] wb_data_tlb_ex
-    
+    output reg [2:0] wb_data_tlb_ex,
+    output reg [31:0] wb_inst
+
 );
 
 always @(posedge clk ) begin
-    if (rst||wb_ex===1'b1||wb_is_ertn===1'b1) begin
+    // ERTN must NOT flush WB: delay slot (in MEM) needs WB to commit after ERTN
+    if (rst||wb_ex===1'b1) begin
         wb_rf_we <= 1'b0;
         wb_alu_result <= 32'd0;
         wb_rd <= 5'd0;
@@ -121,6 +126,7 @@ always @(posedge clk ) begin
         wb_dram_wdata <= 32'd0;
         wb_dram_we <= 1'b0;
         wb_pc<=32'b0;
+        wb_wdram_num<=2'b0;
         wb_rdram_num<=2'b0;
         wb_rdram_need_signed_extend<=1'b0;
         wb_rdram_need_zero_extend<=1'b0;
@@ -158,7 +164,8 @@ always @(posedge clk ) begin
         wb_invtlb_valid <= 1'b0;
         wb_tlb_or_csr_we <= 1'b0;
         wb_inst_tlb_ex <= 2'b0;
-        wb_data_tlb_ex <= 3'b0;    
+        wb_data_tlb_ex <= 3'b0;
+        wb_inst <= 32'd0;
         //wb_csr_rdata<=32'b0;
     end else if(!(mem_ready_go===1'b0))begin
         wb_rf_we <= mem_ref_we;
@@ -171,6 +178,7 @@ always @(posedge clk ) begin
         wb_dram_waddr <= mem_dram_waddr;
         wb_dram_wdata <= mem_dram_wdata;
         wb_dram_we <= mem_dram_we;
+        wb_wdram_num<=mem_wdram_num;
         wb_pc<=mem_pc;
         wb_rdram_num<=mem_rdram_num;
         wb_rdram_need_signed_extend<=mem_rdram_need_signed_extend;
@@ -211,6 +219,7 @@ always @(posedge clk ) begin
         wb_tlb_or_csr_we <= mem_tlb_or_csr_we;
         wb_inst_tlb_ex <= mem_inst_tlb_ex;
         wb_data_tlb_ex <= mem_data_tlb_ex;
+        wb_inst <= mem_inst;
         //wb_csr_rdata<=mem_csr_rdata;
     end
     else
@@ -264,6 +273,7 @@ always @(posedge clk ) begin
         wb_tlb_or_csr_we <= 1'b0;
         wb_inst_tlb_ex <= 2'b0;
         wb_data_tlb_ex <= 3'b0;
+        wb_inst <= 32'd0;
         //wb_csr_rdata<=wb_csr_rdata;
     end
 end

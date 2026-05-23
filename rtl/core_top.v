@@ -60,7 +60,29 @@ module core_top(
     output wire [31:0] debug0_wb_pc,
     output wire [ 3:0] debug0_wb_rf_wen,
     output wire [ 4:0] debug0_wb_rf_wnum,
-    output wire [31:0] debug0_wb_rf_wdata
+    output wire [31:0] debug0_wb_rf_wdata,
+    // pipeline stall debug interface
+    output wire        debug_id_allow_in,
+    output wire        debug_id_ready_go,
+    output wire        debug_exe1_allow_in,
+    output wire        debug_exe2_allow_in,
+    output wire        debug_mem_allow_in,
+    output wire        debug_if_ready_go,
+    output wire        debug_pipe_stalled,
+    output wire        debug_wb_ex,
+    output wire [31:0] debug_id_pc,
+    output wire [31:0] debug_id_inst,
+    output wire [4:0]  debug_id_rj,
+    output wire [4:0]  debug_id_rk,
+    output wire [4:0]  debug_id_rd,
+    output wire        debug_id_src1_from_ref,
+    output wire        debug_id_src2_from_ref,
+    output wire [4:0]  debug_exe2_rd,
+    output wire        debug_exe2_ref_we,
+    output wire [4:0]  debug_mem_rd,
+    output wire        debug_mem_ref_we,
+    output wire [4:0]  debug_wb_rd,
+    output wire        debug_wb_rf_we_dbg
 );
     wire        inst_sram_req;
     wire        inst_sram_wr;
@@ -69,6 +91,8 @@ module core_top(
     wire [31:0] inst_sram_addr;
     wire [31:0] inst_sram_wdata;
     wire        inst_sram_data_ok;
+    wire        real_inst_data_ok;
+    assign real_inst_data_ok = inst_sram_data_ok && !inst_req_valid;
     wire        inst_sram_addr_ok;
     wire [31:0] inst_sram_rdata;
     wire        data_sram_req;
@@ -91,12 +115,13 @@ module core_top(
     assign inst_sram_wstrb=4'b0;
     // pipeline_is_stalled_from_tlb_csr prevents deadlock when tlb_csr_we flag
     // persists in drained pipeline registers after the CSR/TLB instruction has retired
-    wire pipeline_drained_except_if = (id_pc == 32'b0) && (exe_pc == 32'b0) && (mem_pc == 32'b0);
+    wire pipeline_drained_except_if = (id_pc == 32'b0) && (exe1_pc == 32'b0) && (mem_pc == 32'b0);
     assign inst_sram_req= if_allow_in & inst_req_valid & pc_inst_en & (~pipline_is_not_stalled===1'b0) & (!(inst_tlb_or_csr_we === 1'b1) | pipeline_drained_except_if);
 
     wire if_allow_in;
     wire id_allow_in;
-    wire exe_allow_in;
+    wire exe1_allow_in;
+    wire exe2_allow_in;
     wire mem_allow_in;
     wire wb_allow_in;
     wire [31:0]csr_era_pc;
@@ -104,25 +129,27 @@ module core_top(
     wire [31:0] pc_br_target;
     wire pc_br_taken;
     wire [31:0]pc_inst_addr;
+    assign pc_inst_addr = inst_sram_addr;
     wire pc_inst_en;
     wire [31:0] if_pc;
     assign rst = ~aresetn;
-    wire inst_req_valid;//1表示还没给inst_dram发�?�请求，1表示已经给inst_dram发�?�请求，但还没有返回
+    wire inst_req_valid;
     wire wb_ready_go;
     wire if_ready_go;
     wire id_ready_go;
-    wire exe_ready_go;
+    wire exe1_ready_go;
+    wire exe2_ready_go;
     wire mem_ready_go;
     wire pre_if_ready_go;
-    wire [1:0]id_need_cancel;          //下一条流入id_stage的指令需要取�???
+    wire [1:0]id_need_cancel_raw;      //下一条流入id_stage的指令需要取�???
     //wire if_allow_in;
     wire pipline_is_not_stalled;
     wire id_inst_cancel;
-    wire exe_addr_shake_ok;
+    wire exe2_addr_shake_ok;
     wire mem_data_shake_ok;
     wire IF_ready_go;
     wire ID_ready_go;
-    wire EXE_ready_go;
+    wire EXE2_ready_go;
     wire mem_need_and_data_ok;
     wire [4:0] rf_raddr1;
     wire [4:0] rf_raddr2;
@@ -149,6 +176,38 @@ module core_top(
                         inst_dmw1_en                       ?  {csr_dmw1_pseg,inst_sram_addr[28:0]} :  {tlb_s0_ppn[19:0],inst_sram_addr[11:0]};
 
 
+    // === BTB: simple branch target buffer ===
+    wire        btb_hit;
+    wire [31:0] btb_target;
+    wire        btb_update;
+    reg         predicted_taken;  // pipelined BTB hit flag
+
+    reg btb_hit_d1;  // BTB hit when THIS instruction was fetched (pipelined)
+    always @(posedge clk) begin
+        if (rst) begin
+            predicted_taken <= 1'b0;
+            btb_hit_d1 <= 1'b0;
+        end else if (!(if_ready_go===1'b0) && id_allow_in) begin
+            predicted_taken <= btb_hit;
+            btb_hit_d1 <= btb_hit;
+        end
+    end
+
+    btb u_btb(
+        .clk            (clk),
+        .rst            (rst),
+        .lookup_pc      (pc_inst_addr),
+        .hit            (btb_hit),
+        .target         (btb_target),
+        .update         (id_br_taken),
+        .update_pc      (id_pc),
+        .update_target  (id_br_target)
+    );
+
+    // BTB misprediction: predicted taken but branch not taken
+    wire btb_mispredict;
+    assign btb_mispredict = predicted_taken && !id_br_taken;
+
     PC_Reg pc_reg(
         .clk(clk),
         .rst(rst),
@@ -163,17 +222,26 @@ module core_top(
         .pc_br_target(pc_br_target),
         .inst_addr(inst_sram_addr),
         .inst_tlb_ex(inst_tlb_ex),
-        .if_inst_tlb_ex(if_inst_tlb_ex)
+        .if_inst_tlb_ex(if_inst_tlb_ex),
+        .btb_hit(btb_hit),
+        .btb_target(btb_target),
+        .wb_is_ertn(wb_is_ertn),
+        .csr_era_pc(csr_era_pc)
     );
 
 
     assign if_tlb_or_csr_we =  (if_inst[31:24] == 8'h4  &&  if_inst[9:5] != 5'b0 ) ||
                             (if_inst[31:13] == 29'b0000011001001000001 || if_inst[31:15]==17'b00000110010010011);
 
-    assign inst_tlb_or_csr_we = if_tlb_or_csr_we | id_tlb_or_csr_we | exe_tlb_or_csr_we | mem_tlb_or_csr_we | wb_tlb_or_csr_we ;
+    assign inst_tlb_or_csr_we = if_tlb_or_csr_we | id_tlb_or_csr_we | exe2_tlb_or_csr_we | mem_tlb_or_csr_we | wb_tlb_or_csr_we ;
 
 
     wire [31:0] id_inst;
+    wire [31:0] exe1_inst;
+    wire        exe1_dropped;
+    wire [31:0] exe2_inst;
+    wire [31:0] mem_inst;
+    wire [31:0] wb_inst;
     wire [31:0] id_pc;
     wire [31:0] if_inst;
     wire ID_need_cancel;
@@ -182,14 +250,15 @@ module core_top(
     wire id_has_int;
     wire [5:0] id_int_ecode;
     wire [7:0] id_int_esubcode;
-    
+
     ID_Reg id_reg(
         .clk(clk),
         .rst(rst),
         .wb_is_ertn(wb_is_ertn),
+        .mem_is_ertn(mem_is_ertn),
         .if_ready_go(if_ready_go),
-        .exe_allow_in(exe_allow_in),
-        .exe_addr_shake_ok(exe_addr_shake_ok),
+        .exe_allow_in(exe1_allow_in),
+        .exe_addr_shake_ok(exe2_addr_shake_ok),
         .exe_data_ram_req(data_sram_req),
         .exe_data_ram_addr_ok(data_sram_addr_ok),
         .id_inst_cancel(id_inst_cancel),
@@ -211,16 +280,48 @@ module core_top(
         .id_int_ecode(id_int_ecode),
         .id_int_esubcode(id_int_esubcode)
     );
-    reg [31:0] inst_sram_rdata_reg;
-    assign if_inst = inst_sram_rdata_reg;
+    reg [31:0] inst_sram_rdata_safe;
+    reg        br_need_cancel;
+    reg [31:0] br_delay_slot_pc;
 
-    always @(*) begin
-         casez (id_br_taken)
-                 1'b1: inst_sram_rdata_reg = inst_sram_rdata;
-                1'b0, 1'bx, 1'bz: inst_sram_rdata_reg = inst_sram_rdata; // 保持原�??
-         endcase
+    always @(posedge clk) begin
+        if (rst)
+            inst_sram_rdata_safe <= 32'h02800000;
+        else if (real_inst_data_ok)
+            inst_sram_rdata_safe <= inst_sram_rdata;
     end
 
+    always @(posedge clk) begin
+        if (rst || wb_is_ertn || wb_ex) begin
+            br_need_cancel <= 1'b0;
+            br_delay_slot_pc <= 32'b0;
+        end else if (id_br_taken_safe) begin
+            br_need_cancel <= 1'b1;
+            br_delay_slot_pc <= id_pc + 32'd4;
+        end else if (br_need_cancel && !(if_ready_go===1'b0) && id_allow_in && if_pc == br_delay_slot_pc) begin
+            br_need_cancel <= 1'b0;
+        end
+    end
+
+    assign if_inst = rst ? 32'h02800000 :
+                     ((id_br_taken_safe) || br_need_cancel) ? 32'h02800000 :
+                     real_inst_data_ok ? inst_sram_rdata : inst_sram_rdata_safe;
+
+    // DEBUG: verify post-redirect fetch
+    reg dbg_redirected;
+    always @(posedge clk) begin
+        if (rst)                              dbg_redirected <= 1'b0;
+        else if (wb_ex || wb_is_ertn)         dbg_redirected <= 1'b1;
+        else if (inst_sram_data_ok && inst_sram_addr_ok)           dbg_redirected <= 1'b0;
+    end
+    always @(posedge clk) begin
+        if (!rst && dbg_redirected)
+            $display("[POST-EX] %0t: id_inst=%h id_need_cancel=%b if_inst=%h if_pc=%h data_ok=%h pre_if_ready_go=%b rdata=%h if_inst=%h next_addr=%h",
+                $time, id_inst, id_need_cancel, if_inst, if_pc,
+                inst_sram_data_ok && inst_sram_addr_ok, pre_if_ready_go, inst_sram_rdata, if_inst, inst_sram_addr);
+    end
+
+    // === BTB update on id_br_taken ===
     wire [31:0]id_src1;
     wire [31:0]id_src2;
     wire id_ref_we;
@@ -245,6 +346,8 @@ module core_top(
     wire id_src2_is_imm20;
    // wire id_cancel;   //跳转的话，需要置�???????1
     wire id_br_taken;
+    wire id_br_taken_safe;
+    assign id_br_taken_safe = id_br_taken && pipline_is_not_stalled;
     wire [31:0]id_br_target;
     wire id_src1_from_ref;
     wire id_src2_from_ref;
@@ -267,7 +370,6 @@ module core_top(
     wire id_ex_ine;
     wire id_ex_ale_h;
     wire id_ex_ale_w;
-    wire id_has_int;
     wire [63:0] csr_tid_tid;
     wire [63:0] csr_timer_64;
     wire [31:0] id_res_of_cnt;
@@ -293,7 +395,7 @@ module core_top(
     wire int_has_int;
     wire [5:0] int_ecode;
     wire [7:0] int_esubcode;
-    
+
     interrupt u_interrupt(
         .clk(clk),
         .rst(rst),
@@ -354,7 +456,7 @@ module core_top(
         .id_ex_ine(id_ex_ine),                           //指令地址虽然正确，但取出来的指令不存�????,不是任何�????条指�????
         .id_ex_ale_h(id_ex_ale_h),                       //ld.h,ld.hu,st.h时置1
         .id_ex_ale_w(id_ex_ale_w),                      // ld.w,st.w时置1，这两条信号是为了方便之后exe级检测地�????不对齐异�????
-        .id_has_int(id_has_int),                       //�????测中断，在书�????7.2.1节有示例，注意前边多�????3个来自csr的输入信号需要补�????
+        .id_has_int(),                       //�????测中断，在书�????7.2.1节有示例，注意前边多�????3个来自csr的输入信号需要补�????
         .id_res_is_rj(id_res_is_rj),                   //只对应rdcntid指令，写寄存器的地址是rj
         .id_res_of_cnt(id_res_of_cnt),                  //对应三个将counter64相关数据写入寄存器的指令，如果是那三个指令，就输出要写入寄存器堆的数�????
         .id_res_from_cnt(id_res_from_cnt),              //对应上边三个指令时为1
@@ -372,100 +474,196 @@ module core_top(
         .id_tlb_or_csr_we(id_tlb_or_csr_we)
     );
     assign id_dram_wdata=id_src2;
-    assign pc_br_taken=id_br_taken|(wb_ex===1'b1)|(wb_is_ertn==1'b1);
-    //assign pc_br_target=id_br_target|({32{wb_ex===1'b1}}&csr_rvalue)|({32{wb_is_ertn===1'b1}}&csr_era_pc);
-    assign pc_br_target =    wb_is_ertn===1'b1  ?   csr_era_pc  :
+    // ERTN behaves like a branch in ID: redirect PC to ERA immediately,
+    // preventing PC+8 from being fetched. Delay slot (already in IF) still executes.
+    assign pc_br_taken=id_br_taken_safe|(id_is_ertn==1'b1)|btb_mispredict;
+    assign pc_br_target =    btb_mispredict ? (id_pc + 32'd4) :
+                            (wb_is_ertn===1'b1 || id_is_ertn===1'b1)  ?   csr_era_pc  :
                             (csr_data_tlb_refill || csr_inst_tlb_refill) ? {csr_tlbrentry, 6'b0}  :
                             wb_ex===1'b1      ?   csr_rvalue  :  id_br_target;
-    assign id_csr_wdata=id_src2;
-    assign id_csr_wmask = id_csr_mask_all_one? 32'hffffffff : id_src1;
+    wire [31:0] id_src2_fwd;
+    assign id_src2_fwd = (exe1_ref_we && exe1_rd == rf_raddr2 && rf_raddr2 != 5'd0) ? exe1_alu_result :
+                         (exe2_ref_we && exe2_rd == rf_raddr2 && rf_raddr2 != 5'd0) ? exe2_alu_result :
+                         (mem_ref_we  && mem_rd  == rf_raddr2 && rf_raddr2 != 5'd0) ? mem_alu_result  :
+                         (wb_rf_we    && wb_rd   == rf_raddr2 && rf_raddr2 != 5'd0) ? rf_wdata         :
+                         rf_rdata2;
+    assign id_csr_wdata = id_src2_fwd;
+    wire [31:0] id_src1_fwd;
+    assign id_src1_fwd = (exe1_ref_we && exe1_rd == rf_raddr1 && rf_raddr1 != 5'd0) ? exe1_alu_result :
+                         (exe2_ref_we && exe2_rd == rf_raddr1 && rf_raddr1 != 5'd0) ? exe2_alu_result :
+                         (mem_ref_we  && mem_rd  == rf_raddr1 && rf_raddr1 != 5'd0) ? mem_alu_result  :
+                         (wb_rf_we    && wb_rd   == rf_raddr1 && rf_raddr1 != 5'd0) ? rf_wdata         :
+                         rf_rdata1;
+    assign id_csr_wmask = id_csr_mask_all_one? 32'hffffffff : id_src1_fwd;
+
+    // DEBUG: csrwr forwarding trace
+    wire is_csrwr = (id_inst[31:24] == 8'h04) && (id_inst[25:24] == 2'b00) && (id_inst[9:5] == 5'd1);
+    always @(posedge clk) begin
+        if (!rst && (is_csrwr || id_csr_we)) begin
+            $display("[CSR-FWD] %0t: id_inst=%h csrwe=%b src2_fwd=%h rf_raddr2=%d rf_rdata2=%h",
+                $time, id_inst, id_csr_we, id_src2_fwd, rf_raddr2, rf_rdata2);
+            $display("[CSR-FWD]   exe1_rwe=%b exe1_rd=%d exe1_res=%h exe2_rwe=%b exe2_rd=%d exe2_res=%h",
+                exe1_ref_we, exe1_rd, exe1_alu_result, exe2_ref_we, exe2_rd, exe2_alu_result);
+            $display("[CSR-FWD]   mem_rwe=%b  mem_rd=%d  mem_res=%h  wb_rwe=%b   wb_rd=%d  wb_res=%h",
+                mem_ref_we, mem_rd, mem_alu_result, wb_rf_we, wb_rd, rf_wdata);
+        end
+    end
+    // DEBUG: track exe1_csr_wdata when it captures csrwr
+    always @(posedge clk) begin
+        if (!rst && exe1_csr_we)
+            $display("[CSR-EXE1] %0t: exe1_csr_wdata=%h exe1_pc=%h",
+                $time, exe1_csr_wdata, exe1_pc);
+    end
+    always @(posedge clk) begin
+        if (!rst && wb_csr_we)
+            $display("[CSR-WB] %0t: wb_csr_wdata=%h wb_csr_num=%d wb_ex=%b wb_pc=%h",
+                $time, wb_csr_wdata, wb_csr_num, wb_ex, wb_pc);
+    end
+
     assign id_invtlb_asid = rf_rdata1[9:0];
     assign id_invtlb_va = rf_rdata2[31:13];
     //assign id_csr_rdata=csr_rvalue;
-
-    wire [31:0]exe_src1;
-    wire [4:0]exe_rd;
-    wire [31:0]exe_src2;
-    wire exe_ref_we;
-    wire [4:0]exe_alu_op;
-    wire exe_dram_we;
-    wire exe_dram_re;
-    wire [11:0] exe_imm12;
-    wire exe_src2_is_imm12;
-    wire [4:0] exe_imm5;
-    wire exe_src2_is_imm5;
-    wire [31:0] exe_pc;
-    wire [15:0] exe_imm16;
-    wire exe_src2_is_imm26;
-    wire [25:0]exe_imm26;
-    wire exe_src2_is_imm16;
-    wire exe_res_from_dram;
-    wire [31:0] exe_dram_wdata;
-    wire [19:0] exe_imm20;
-    wire exe_src2_is_imm20;
-    wire [31:0] exe_dram_waddr;
-    wire [31:0] exe_rf_src1;
-    wire [31:0] exe_rf_src2;
-    wire exe_zero_extend;
-    wire exe_rdram_need_zero_extend;
-    wire exe_rdram_need_signed_extend;
-    wire [1:0]exe_rdram_num;
-    wire [1:0]exe_wdram_num;
-
-    wire [13:0] exe_csr_num;
-    wire exe_csr_we;
-    wire exe_is_ertn;
-    wire exe_is_syscall;
-    wire exe_res_from_csr;
-    wire [31:0] exe_csr_wmask;
-    wire [31:0] exe_csr_wdata;
-    wire exe_ex_ale_h;
-    wire exe_ex_ale_w;
-    wire exe_ex_ale;
-    wire exe_ex_adef;
-    wire exe_ex_brk;
-    wire exe_ex_ine;
-    wire exe_has_int;
-    wire [4:0]exe_rj;
-    wire [31:0]exe_res_of_cnt;
-    wire exe_res_is_rj;
-    wire exe_res_from_cnt;
-    wire exe_res_from_tid;
-    wire exe_need_data_sram;
-    wire exe_need_cancel;
-    wire exe_inst_tlbrd;
-    wire exe_inst_tlbsrch;
-    wire exe_tlb_wr_en;
-    wire exe_tlb_fill_en;
-    wire exe_tlb_we;
-    wire exe_invtlb_valid;
-    wire [4:0]exe_invtlb_op;
-    wire [9:0]exe_invtlb_asid;
-    wire [18:0]exe_invtlb_va;
-    wire exe_div_is_doing;
-    wire exe_is_st;
-    wire exe_is_ld;
-    wire exe_tlb_or_csr_we;
-    wire [1:0]exe_inst_tlb_ex;
-    // EXE级中断标记信号
-    wire [5:0] exe_int_ecode;
-    wire [7:0] exe_int_esubcode;
+    // ---- EXE1 stage wires (outputs from ExE1_reg) ----
+    wire [31:0]exe1_src1;
+    wire [4:0]exe1_rd;
+    wire [31:0]exe1_src2;
+    wire exe1_ref_we;
+    wire [4:0]exe1_alu_op;
+    wire exe1_dram_we;
+    wire exe1_dram_re;
+    wire [11:0] exe1_imm12;
+    wire exe1_src2_is_imm12;
+    wire [4:0] exe1_imm5;
+    wire exe1_src2_is_imm5;
+    wire [31:0] exe1_pc;
+    wire [15:0] exe1_imm16;
+    wire exe1_src2_is_imm26;
+    wire [25:0]exe1_imm26;
+    wire exe1_src2_is_imm16;
+    wire exe1_res_from_dram;
+    wire [31:0] exe1_dram_wdata;
+    wire [19:0] exe1_imm20;
+    wire exe1_src2_is_imm20;
+    wire [31:0] exe1_rf_src1;
+    wire [31:0] exe1_rf_src2;
+    wire exe1_zero_extend;
+    wire exe1_rdram_need_zero_extend;
+    wire exe1_rdram_need_signed_extend;
+    wire [1:0]exe1_rdram_num;
+    wire [1:0]exe1_wdram_num;
+    wire [13:0] exe1_csr_num;
+    wire exe1_csr_we;
+    wire exe1_is_ertn;
+    wire exe1_is_syscall;
+    wire exe1_res_from_csr;
+    wire [31:0] exe1_csr_wmask;
+    wire [31:0] exe1_csr_wdata;
+    wire exe1_ex_ale_h;
+    wire exe1_ex_ale_w;
+    wire exe1_ex_adef;
+    wire exe1_ex_brk;
+    wire exe1_ex_ine;
+    wire exe1_has_int;
+    wire [4:0]exe1_rj;
+    wire [31:0]exe1_res_of_cnt;
+    wire exe1_res_is_rj;
+    wire exe1_res_from_cnt;
+    wire exe1_res_from_tid;
+    wire exe1_need_data_sram;
+    wire exe1_need_cancel;
+    wire exe1_inst_tlbrd;
+    wire exe1_inst_tlbsrch;
+    wire exe1_tlb_wr_en;
+    wire exe1_tlb_fill_en;
+    wire exe1_tlb_we;
+    wire exe1_invtlb_valid;
+    wire [4:0]exe1_invtlb_op;
+    wire [9:0]exe1_invtlb_asid;
+    wire [18:0]exe1_invtlb_va;
+    wire exe1_is_st;
+    wire exe1_is_ld;
+    wire exe1_tlb_or_csr_we;
+    wire [1:0]exe1_inst_tlb_ex;
+    wire [5:0] exe1_int_ecode;
+    wire [7:0] exe1_int_esubcode;
+    wire exe1_div_is_doing;
+    // ---- EXE2 stage wires (outputs from ExE2_reg) ----
+    wire [31:0]exe2_src1;
+    wire [4:0]exe2_rd;
+    wire [31:0]exe2_src2;
+    wire exe2_ref_we;
+    wire [4:0]exe2_alu_op;
+    wire exe2_dram_we;
+    wire exe2_dram_re;
+    wire [11:0] exe2_imm12;
+    wire exe2_src2_is_imm12;
+    wire [4:0] exe2_imm5;
+    wire exe2_src2_is_imm5;
+    wire [31:0] exe2_pc;
+    wire [15:0] exe2_imm16;
+    wire exe2_src2_is_imm26;
+    wire [25:0]exe2_imm26;
+    wire exe2_src2_is_imm16;
+    wire exe2_res_from_dram;
+    wire [31:0] exe2_dram_wdata;
+    wire [19:0] exe2_imm20;
+    wire exe2_src2_is_imm20;
+    wire [31:0] exe2_rf_src1;
+    wire [31:0] exe2_rf_src2;
+    wire exe2_zero_extend;
+    wire exe2_rdram_need_zero_extend;
+    wire exe2_rdram_need_signed_extend;
+    wire [1:0]exe2_rdram_num;
+    wire [1:0]exe2_wdram_num;
+    wire [13:0] exe2_csr_num;
+    wire exe2_csr_we;
+    wire exe2_is_ertn;
+    wire exe2_is_syscall;
+    wire exe2_res_from_csr;
+    wire [31:0] exe2_csr_wmask;
+    wire [31:0] exe2_csr_wdata;
+    wire exe2_ex_ale_h;
+    wire exe2_ex_ale_w;
+    wire exe2_ex_adef;
+    wire exe2_ex_brk;
+    wire exe2_ex_ine;
+    wire exe2_has_int;
+    wire [4:0]exe2_rj;
+    wire [31:0]exe2_res_of_cnt;
+    wire exe2_res_is_rj;
+    wire exe2_res_from_cnt;
+    wire exe2_res_from_tid;
+    wire exe2_need_data_sram;
+    wire exe2_need_cancel;
+    wire exe2_inst_tlbrd;
+    wire exe2_inst_tlbsrch;
+    wire exe2_tlb_wr_en;
+    wire exe2_tlb_fill_en;
+    wire exe2_tlb_we;
+    wire exe2_invtlb_valid;
+    wire [4:0]exe2_invtlb_op;
+    wire [9:0]exe2_invtlb_asid;
+    wire [18:0]exe2_invtlb_va;
+    wire exe2_is_st;
+    wire exe2_is_ld;
+    wire exe2_tlb_or_csr_we;
+    wire [1:0]exe2_inst_tlb_ex;
+    wire [5:0] exe2_int_ecode;
+    wire [7:0] exe2_int_esubcode;
 
 
     //wire [31:0]exe_csr_rdata;
-    ExE_reg exe_reg(
+    ExE1_reg exe1_reg(
         .clk(clk),
         .rst(rst),
         .wb_ex(wb_ex),
         .wb_is_ertn(wb_is_ertn),
-        .exe_div_is_doing(exe_div_is_doing),
+        .mem_is_ertn(mem_is_ertn),
+        .exe1_div_is_doing(exe1_div_is_doing),
+        .exe1_ready_go(exe1_ready_go),
         .id_ready_go(id_ready_go),
-        .exe_ready_go(exe_ready_go),
-        .mem_allow_in(mem_allow_in),
-        .exe_allow_in(exe_allow_in),
-        .exe_addr_shake_ok(exe_addr_shake_ok),
-        .mem_data_shake_ok(mem_data_shake_ok),
-        .mem_need_and_data_ok(mem_need_and_data_ok),
+        .exe1_allow_in(exe1_allow_in),
+        .exe2_allow_in(exe2_allow_in),
         .id_rd(id_rd),
         .id_src1(id_src1),
         .id_src2(id_src2),
@@ -526,113 +724,116 @@ module core_top(
         .id_is_ld(id_is_ld),
         .id_tlb_or_csr_we(id_tlb_or_csr_we),
         .id_inst_tlb_ex(id_inst_tlb_ex),
+        .id_inst(id_inst),
         //.id_csr_rdata(id_csr_rdata),
-        .exe_rd(exe_rd),
-        .exe_src1(exe_src1),
-        .exe_src2(exe_src2),
-        .exe_ref_we(exe_ref_we),
-        .exe_alu_op(exe_alu_op),
-        .exe_dram_re(exe_dram_re),
-        .exe_dram_we(exe_dram_we),
-        .exe_imm12(exe_imm12),
-        .exe_src2_is_imm12(exe_src2_is_imm12),
-        .exe_pc(exe_pc),
-        .exe_imm16(exe_imm16),
-        .exe_imm5(exe_imm5),
-        .exe_src2_is_imm5(exe_src2_is_imm5),
-        .exe_src2_is_imm26(exe_src2_is_imm26),
-        .exe_imm26(exe_imm26),
-        .exe_src2_is_imm16(exe_src2_is_imm16),
-        .exe_res_from_dram(exe_res_from_dram),
-        .exe_dram_wdata(exe_dram_wdata),
-        .exe_imm20(exe_imm20),
-        .exe_src2_is_imm20(exe_src2_is_imm20),
-        .exe_rf_src1(exe_rf_src1),
-        .exe_rf_src2(exe_rf_src2),
-        .exe_zero_extend(exe_zero_extend),
-        .exe_rdram_need_zero_extend(exe_rdram_need_zero_extend),
-        .exe_rdram_need_signed_extend(exe_rdram_need_signed_extend),
-        .exe_rdram_num(exe_rdram_num),
-        .exe_wdram_num(exe_wdram_num) ,
-        .exe_csr_num(exe_csr_num),
-        .exe_csr_we(exe_csr_we),
-        .exe_is_ertn(exe_is_ertn),
-        .exe_is_syscall(exe_is_sycall),
-        .exe_res_from_csr(exe_res_from_csr),
-        .exe_csr_wmask(exe_csr_wmask),
-        .exe_csr_wdata(exe_csr_wdata),
-        .exe_ex_adef(exe_ex_adef),
-        .exe_ex_brk(exe_ex_brk),
-        .exe_ex_ine(exe_ex_ine),
-        .exe_ex_ale_h(exe_ex_ale_h),
-        .exe_ex_ale_w(exe_ex_ale_w),
-        .exe_has_int(exe_has_int),
-        .exe_int_ecode(exe_int_ecode),
-        .exe_int_esubcode(exe_int_esubcode),
-        .exe_rj(exe_rj),
-        .exe_res_of_cnt(exe_res_of_cnt),
-        .exe_res_is_rj(exe_res_is_rj),
-        .exe_res_from_cnt(exe_res_from_cnt),
-        .exe_res_from_tid(exe_res_from_tid),
-        .exe_need_data_sram(exe_need_data_sram),
-        .exe_need_cancel(exe_need_cancel),
-        .exe_inst_tlbrd(exe_inst_tlbrd),
-        .exe_inst_tlbsrch(exe_inst_tlbsrch),
-        .exe_tlb_we(exe_tlb_we),
-        .exe_tlb_wr_en(exe_tlb_wr_en),
-        .exe_tlb_fill_en(exe_tlb_fill_en),
-        .exe_invtlb_asid(exe_invtlb_asid),
-        .exe_invtlb_op(exe_invtlb_op),
-        .exe_invtlb_va(exe_invtlb_va),
-        .exe_invtlb_valid(exe_invtlb_valid),
-        .exe_is_st(exe_is_st),
-        .exe_is_ld(exe_is_ld),
-        .exe_tlb_or_csr_we(exe_tlb_or_csr_we),
-        .exe_inst_tlb_ex(exe_inst_tlb_ex)
-
+        .exe1_rd(exe1_rd),
+        .exe1_src1(exe1_src1),
+        .exe1_src2(exe1_src2),
+        .exe1_ref_we(exe1_ref_we),
+        .exe1_alu_op(exe1_alu_op),
+        .exe1_dram_re(exe1_dram_re),
+        .exe1_dram_we(exe1_dram_we),
+        .exe1_imm12(exe1_imm12),
+        .exe1_src2_is_imm12(exe1_src2_is_imm12),
+        .exe1_pc(exe1_pc),
+        .exe1_imm16(exe1_imm16),
+        .exe1_imm5(exe1_imm5),
+        .exe1_src2_is_imm5(exe1_src2_is_imm5),
+        .exe1_src2_is_imm26(exe1_src2_is_imm26),
+        .exe1_imm26(exe1_imm26),
+        .exe1_src2_is_imm16(exe1_src2_is_imm16),
+        .exe1_res_from_dram(exe1_res_from_dram),
+        .exe1_dram_wdata(exe1_dram_wdata),
+        .exe1_imm20(exe1_imm20),
+        .exe1_src2_is_imm20(exe1_src2_is_imm20),
+        .exe1_rf_src1(exe1_rf_src1),
+        .exe1_rf_src2(exe1_rf_src2),
+        .exe1_zero_extend(exe1_zero_extend),
+        .exe1_rdram_need_zero_extend(exe1_rdram_need_zero_extend),
+        .exe1_rdram_need_signed_extend(exe1_rdram_need_signed_extend),
+        .exe1_rdram_num(exe1_rdram_num),
+        .exe1_wdram_num(exe1_wdram_num),
+        .exe1_csr_num(exe1_csr_num),
+        .exe1_csr_we(exe1_csr_we),
+        .exe1_is_ertn(exe1_is_ertn),
+        .exe1_is_syscall(exe1_is_syscall),
+        .exe1_res_from_csr(exe1_res_from_csr),
+        .exe1_csr_wmask(exe1_csr_wmask),
+        .exe1_csr_wdata(exe1_csr_wdata),
+        .exe1_ex_adef(exe1_ex_adef),
+        .exe1_ex_brk(exe1_ex_brk),
+        .exe1_ex_ine(exe1_ex_ine),
+        .exe1_ex_ale_h(exe1_ex_ale_h),
+        .exe1_ex_ale_w(exe1_ex_ale_w),
+        .exe1_has_int(exe1_has_int),
+        .exe1_int_ecode(exe1_int_ecode),
+        .exe1_int_esubcode(exe1_int_esubcode),
+        .exe1_rj(exe1_rj),
+        .exe1_res_of_cnt(exe1_res_of_cnt),
+        .exe1_res_is_rj(exe1_res_is_rj),
+        .exe1_res_from_cnt(exe1_res_from_cnt),
+        .exe1_res_from_tid(exe1_res_from_tid),
+        .exe1_need_data_sram(exe1_need_data_sram),
+        .exe1_need_cancel(exe1_need_cancel),
+        .exe1_inst_tlbrd(exe1_inst_tlbrd),
+        .exe1_inst_tlbsrch(exe1_inst_tlbsrch),
+        .exe1_tlb_we(exe1_tlb_we),
+        .exe1_tlb_wr_en(exe1_tlb_wr_en),
+        .exe1_tlb_fill_en(exe1_tlb_fill_en),
+        .exe1_invtlb_asid(exe1_invtlb_asid),
+        .exe1_invtlb_op(exe1_invtlb_op),
+        .exe1_invtlb_va(exe1_invtlb_va),
+        .exe1_invtlb_valid(exe1_invtlb_valid),
+        .exe1_is_st(exe1_is_st),
+        .exe1_is_ld(exe1_is_ld),
+        .exe1_tlb_or_csr_we(exe1_tlb_or_csr_we),
+        .exe1_inst_tlb_ex(exe1_inst_tlb_ex),
+        .exe1_inst(exe1_inst),
+        .exe1_dropped(exe1_dropped)
     );
 
-    wire [31:0] exe_alu_result;
+    wire [31:0] exe1_alu_result;
     wire [31:0] alu_src1;
     wire [31:0] alu_src2;
-    wire [31:0]exe_br_target;
-    wire exe_br_taken;
-    wire [17:0]exe_imm16_extend;
-    wire [27:0]exe_imm26_extend;
-    assign exe_imm16_extend={exe_imm16,2'b00};
-    assign exe_imm26_extend={exe_imm26,2'b00};
+    wire [31:0]exe1_br_target;
+    wire exe1_br_taken;
+    wire [17:0]exe1_imm16_extend;
+    wire [27:0]exe1_imm26_extend;
+    assign exe1_imm16_extend={exe1_imm16,2'b00};
+    assign exe1_imm26_extend={exe1_imm26,2'b00};
     wire div_divsigned;
     wire div_completed;
+    wire div_done;
     wire div_en;
     wire [31:0] div_result;
     wire [31:0] div_rest;
-    wire [31:0] exe_alu_ret;
+    wire [31:0] exe1_alu_ret;
 
 
-    assign alu_src1=exe_src1;
-    assign alu_src2 = exe_src2_is_imm12  ?  exe_zero_extend?     {20'b0,exe_imm12} :{{20{exe_imm12[11]}}, exe_imm12} :
-                  exe_src2_is_imm5   ? {{27{exe_imm5[4]}}, exe_imm5} :
-                  exe_src2_is_imm26  ?  {{4{exe_imm26_extend[27]}}, exe_imm26_extend}:
-                  exe_src2_is_imm16  ?  {{14{exe_imm16_extend[17]}}, exe_imm16_extend} :
-                  exe_src2_is_imm20  ? exe_imm20 :
-                                       exe_src2;
-    assign div_divsigned = exe_alu_op == 5'd22 || exe_alu_op == 5'd20;
-    assign div_en = exe_alu_op == 5'd20 || exe_alu_op == 5'd21 || exe_alu_op == 5'd22 || exe_alu_op == 5'd23 ;
-    assign exe_div_is_doing = div_en && div_completed==1'b0;
+    assign alu_src1=exe1_src1;
+    assign alu_src2 = exe1_src2_is_imm12  ?  exe1_zero_extend?     {20'b0,exe1_imm12} :{{20{exe1_imm12[11]}}, exe1_imm12} :
+                  exe1_src2_is_imm5   ? {{27{exe1_imm5[4]}}, exe1_imm5} :
+                  exe1_src2_is_imm26  ?  {{4{exe1_imm26_extend[27]}}, exe1_imm26_extend}:
+                  exe1_src2_is_imm16  ?  {{14{exe1_imm16_extend[17]}}, exe1_imm16_extend} :
+                  exe1_src2_is_imm20  ? exe1_imm20 :
+                                       exe1_src2;
+    assign div_divsigned = exe1_alu_op == 5'd22 || exe1_alu_op == 5'd20;
+    assign div_en = exe1_alu_op == 5'd20 || exe1_alu_op == 5'd21 || exe1_alu_op == 5'd22 || exe1_alu_op == 5'd23 ;
+    assign exe1_div_is_doing = div_en && div_done==1'b0;
 
     ALU alu(
         .src1(alu_src1),
         .src2(alu_src2),
-        .alu_op(exe_alu_op),
-        .exe_alu_result(exe_alu_ret),
-        .exe_pc(exe_pc),
-        .exe_br_taken(exe_br_taken),
-        .exe_br_target(exe_br_target),
-        .alu_rf_src1(exe_rf_src1),
-        .alu_rf_src2(exe_rf_src2),
-        .exe_ex_ale_h(exe_ex_ale_h),
-        .exe_ex_ale_w(exe_ex_ale_w),
-        .exe_ex_ale(exe_ex_ale)       //exe_ex_ale_h�????1时，�????测运算结果最低位是否�????0，不是的话置1；exe_ex_ale_w�????0时，�????测运算结果低两位是否�????0，不是就�????1
+        .alu_op(exe1_alu_op),
+        .exe_alu_result(exe1_alu_ret),
+        .exe_pc(exe1_pc),
+        .exe_br_taken(exe1_br_taken),
+        .exe_br_target(exe1_br_target),
+        .alu_rf_src1(exe1_rf_src1),
+        .alu_rf_src2(exe1_rf_src2),
+        .exe_ex_ale_h(exe1_ex_ale_h),
+        .exe_ex_ale_w(exe1_ex_ale_w),
+        .exe_ex_ale(exe1_ex_ale)       //exe_ex_ale_h�????1时，�????测运算结果最低位是否�????0，不是的话置1；exe_ex_ale_w�????0时，�????测运算结果低两位是否�????0，不是就�????1
     );//
 
 
@@ -645,11 +846,169 @@ module core_top(
         .y(alu_src2),
         .s(div_result),
         .r(div_rest),
-        .complete(div_completed)
+        .complete(div_completed),
+        .div_done(div_done)
     );
-    assign exe_alu_result = (exe_alu_op==5'd20 || exe_alu_op == 5'd21) ?   div_result :
-                            (exe_alu_op==5'd22 || exe_alu_op == 5'd23) ?   div_rest : exe_alu_ret;
-    assign exe_dram_waddr = exe_alu_result;
+    assign exe1_alu_result = (exe1_alu_op==5'd20 || exe1_alu_op == 5'd21) ?   div_result :
+                            (exe1_alu_op==5'd22 || exe1_alu_op == 5'd23) ?   div_rest : exe1_alu_ret;
+
+    // ---- EXE2 stage wires (computed from ALU outputs, passed through ExE2_reg) ----
+    wire [31:0] exe2_alu_result;
+    wire exe2_br_taken;
+    wire [31:0] exe2_br_target;
+    wire exe2_ex_ale;
+    wire [31:0] exe2_data_addr;
+
+    ExE2_reg exe2_reg(
+        .clk(clk),
+        .rst(rst),
+        .wb_ex(wb_ex),
+        .wb_is_ertn(wb_is_ertn),
+        .exe1_ready_go(exe1_ready_go),
+        .exe2_allow_in(exe2_allow_in),
+        .mem_allow_in(mem_allow_in),
+        .exe2_ready_go(exe2_ready_go),
+        .exe2_addr_shake_ok(exe2_addr_shake_ok),
+        .mem_data_shake_ok(mem_data_shake_ok),
+        .mem_need_and_data_ok(mem_need_and_data_ok),
+
+        .exe1_rd(exe1_rd),
+        .exe1_src1(exe1_src1),
+        .exe1_src2(exe1_src2),
+        .exe1_ref_we(exe1_ref_we),
+        .exe1_alu_op(exe1_alu_op),
+        .exe1_dram_re(exe1_dram_re),
+        .exe1_dram_we(exe1_dram_we),
+        .exe1_imm12(exe1_imm12),
+        .exe1_src2_is_imm12(exe1_src2_is_imm12),
+        .exe1_src2_is_imm5(exe1_src2_is_imm5),
+        .exe1_imm5(exe1_imm5),
+        .exe1_pc(exe1_pc),
+        .exe1_imm16(exe1_imm16),
+        .exe1_imm26(exe1_imm26),
+        .exe1_src2_is_imm26(exe1_src2_is_imm26),
+        .exe1_src2_is_imm16(exe1_src2_is_imm16),
+        .exe1_res_from_dram(exe1_res_from_dram),
+        .exe1_dram_wdata(exe1_dram_wdata),
+        .exe1_imm20(exe1_imm20),
+        .exe1_src2_is_imm20(exe1_src2_is_imm20),
+        .exe1_rf_src1(exe1_rf_src1),
+        .exe1_rf_src2(exe1_rf_src2),
+        .exe1_zero_extend(exe1_zero_extend),
+        .exe1_rdram_need_zero_extend(exe1_rdram_need_zero_extend),
+        .exe1_rdram_need_signed_extend(exe1_rdram_need_signed_extend),
+        .exe1_rdram_num(exe1_rdram_num),
+        .exe1_wdram_num(exe1_wdram_num),
+        .exe1_csr_num(exe1_csr_num),
+        .exe1_csr_we(exe1_csr_we),
+        .exe1_is_ertn(exe1_is_ertn),
+        .exe1_is_syscall(exe1_is_syscall),
+        .exe1_res_from_csr(exe1_res_from_csr),
+        .exe1_csr_wmask(exe1_csr_wmask),
+        .exe1_csr_wdata(exe1_csr_wdata),
+        .exe1_ex_adef(exe1_ex_adef),
+        .exe1_ex_brk(exe1_ex_brk),
+        .exe1_ex_ine(exe1_ex_ine),
+        .exe1_ex_ale_h(exe1_ex_ale_h),
+        .exe1_ex_ale_w(exe1_ex_ale_w),
+        .exe1_has_int(exe1_has_int),
+        .exe1_int_ecode(exe1_int_ecode),
+        .exe1_int_esubcode(exe1_int_esubcode),
+        .exe1_rj(exe1_rj),
+        .exe1_res_of_cnt(exe1_res_of_cnt),
+        .exe1_res_is_rj(exe1_res_is_rj),
+        .exe1_res_from_cnt(exe1_res_from_cnt),
+        .exe1_res_from_tid(exe1_res_from_tid),
+        .exe1_need_data_sram(exe1_need_data_sram),
+        .exe1_need_cancel(exe1_need_cancel),
+        .exe1_inst_tlbrd(exe1_inst_tlbrd),
+        .exe1_inst_tlbsrch(exe1_inst_tlbsrch),
+        .exe1_tlb_wr_en(exe1_tlb_wr_en),
+        .exe1_tlb_we(exe1_tlb_we),
+        .exe1_tlb_fill_en(exe1_tlb_fill_en),
+        .exe1_invtlb_asid(exe1_invtlb_asid),
+        .exe1_invtlb_op(exe1_invtlb_op),
+        .exe1_invtlb_va(exe1_invtlb_va),
+        .exe1_invtlb_valid(exe1_invtlb_valid),
+        .exe1_is_st(exe1_is_st),
+        .exe1_is_ld(exe1_is_ld),
+        .exe1_tlb_or_csr_we(exe1_tlb_or_csr_we),
+        .exe1_inst_tlb_ex(exe1_inst_tlb_ex),
+        .exe1_alu_result(exe1_alu_result),
+        .exe1_br_taken(exe1_br_taken),
+        .exe1_br_target(exe1_br_target),
+        .exe1_ex_ale(exe1_ex_ale),
+        .exe1_inst(exe1_inst),
+
+        .exe2_rd(exe2_rd),
+        .exe2_src1(exe2_src1),
+        .exe2_src2(exe2_src2),
+        .exe2_ref_we(exe2_ref_we),
+        .exe2_alu_op(exe2_alu_op),
+        .exe2_dram_re(exe2_dram_re),
+        .exe2_dram_we(exe2_dram_we),
+        .exe2_imm12(exe2_imm12),
+        .exe2_src2_is_imm12(exe2_src2_is_imm12),
+        .exe2_src2_is_imm5(exe2_src2_is_imm5),
+        .exe2_imm5(exe2_imm5),
+        .exe2_pc(exe2_pc),
+        .exe2_imm16(exe2_imm16),
+        .exe2_imm26(exe2_imm26),
+        .exe2_src2_is_imm26(exe2_src2_is_imm26),
+        .exe2_src2_is_imm16(exe2_src2_is_imm16),
+        .exe2_res_from_dram(exe2_res_from_dram),
+        .exe2_dram_wdata(exe2_dram_wdata),
+        .exe2_imm20(exe2_imm20),
+        .exe2_src2_is_imm20(exe2_src2_is_imm20),
+        .exe2_rf_src1(exe2_rf_src1),
+        .exe2_rf_src2(exe2_rf_src2),
+        .exe2_zero_extend(exe2_zero_extend),
+        .exe2_rdram_need_zero_extend(exe2_rdram_need_zero_extend),
+        .exe2_rdram_need_signed_extend(exe2_rdram_need_signed_extend),
+        .exe2_rdram_num(exe2_rdram_num),
+        .exe2_wdram_num(exe2_wdram_num),
+        .exe2_csr_num(exe2_csr_num),
+        .exe2_csr_we(exe2_csr_we),
+        .exe2_is_ertn(exe2_is_ertn),
+        .exe2_is_syscall(exe2_is_syscall),
+        .exe2_res_from_csr(exe2_res_from_csr),
+        .exe2_csr_wmask(exe2_csr_wmask),
+        .exe2_csr_wdata(exe2_csr_wdata),
+        .exe2_ex_adef(exe2_ex_adef),
+        .exe2_ex_brk(exe2_ex_brk),
+        .exe2_ex_ine(exe2_ex_ine),
+        .exe2_ex_ale_h(exe2_ex_ale_h),
+        .exe2_ex_ale_w(exe2_ex_ale_w),
+        .exe2_has_int(exe2_has_int),
+        .exe2_int_ecode(exe2_int_ecode),
+        .exe2_int_esubcode(exe2_int_esubcode),
+        .exe2_rj(exe2_rj),
+        .exe2_res_of_cnt(exe2_res_of_cnt),
+        .exe2_res_is_rj(exe2_res_is_rj),
+        .exe2_res_from_cnt(exe2_res_from_cnt),
+        .exe2_res_from_tid(exe2_res_from_tid),
+        .exe2_need_data_sram(exe2_need_data_sram),
+        .exe2_need_cancel(exe2_need_cancel),
+        .exe2_inst_tlbrd(exe2_inst_tlbrd),
+        .exe2_inst_tlbsrch(exe2_inst_tlbsrch),
+        .exe2_tlb_wr_en(exe2_tlb_wr_en),
+        .exe2_tlb_we(exe2_tlb_we),
+        .exe2_tlb_fill_en(exe2_tlb_fill_en),
+        .exe2_invtlb_asid(exe2_invtlb_asid),
+        .exe2_invtlb_op(exe2_invtlb_op),
+        .exe2_invtlb_va(exe2_invtlb_va),
+        .exe2_invtlb_valid(exe2_invtlb_valid),
+        .exe2_is_st(exe2_is_st),
+        .exe2_is_ld(exe2_is_ld),
+        .exe2_tlb_or_csr_we(exe2_tlb_or_csr_we),
+        .exe2_inst_tlb_ex(exe2_inst_tlb_ex),
+        .exe2_alu_result(exe2_alu_result),
+        .exe2_br_taken(exe2_br_taken),
+        .exe2_br_target(exe2_br_target),
+        .exe2_ex_ale(exe2_ex_ale),
+        .exe2_inst(exe2_inst)
+    );
+
     wire [31:0] mem_alu_result;
     wire  mem_ref_we;
     wire [4:0] mem_rd;
@@ -689,12 +1048,11 @@ module core_top(
     wire mem_need_data_sram;//
     wire mem_ex_ale_h;
     wire mem_ex_ale_w;
-    wire [31:0] exe_dram_rdata;
-    wire [31:0] exe_data_addr;
+    wire [31:0] exe2_dram_rdata;
     wire [31:0] mem_data_addr;
     wire mem_need_cancel;
     wire mem_inst_tlbrd;
-    assign exe_data_addr = data_sram_addr ;
+    assign exe2_data_addr = data_sram_addr ;
     wire mem_inst_tlbsrch;
     wire mem_tlb_we;
     wire mem_tlb_fill_en;
@@ -714,61 +1072,62 @@ module core_top(
         .rst(rst),
         .wb_ex(wb_ex),
         .wb_is_ertn(wb_is_ertn),
-        .exe_ready_go(exe_ready_go),
+        .exe2_ready_go(exe2_ready_go),
         .mem_allow_in(mem_allow_in),
         .mem_data_shake_ok(mem_data_shake_ok),
-        .exe_alu_result(exe_alu_result),
-        .exe_ref_we(exe_ref_we),
-        .exe_dram_re(exe_dram_re),
-        .exe_dram_we(exe_dram_we),
-        .exe_data_addr(exe_data_addr),
-        .exe_rd(exe_rd),
-        //.exe_br_taken(exe_br_taken),
-        //.exe_br_target(exe_br_target),
-        .exe_res_from_dram(exe_res_from_dram),
-        .exe_dram_waddr(exe_dram_waddr),
-        .exe_dram_wdata(exe_dram_wdata),
-        .exe_pc(exe_pc),
-        .exe_rdram_need_zero_extend(exe_rdram_need_zero_extend),
-        .exe_rdram_need_signed_extend(exe_rdram_need_signed_extend),
-        .exe_rdram_num(exe_rdram_num),
-        .exe_wdram_num(exe_wdram_num),
-        .exe_csr_num(exe_csr_num),
-        .exe_csr_we(exe_csr_we),
-        .exe_is_ertn(exe_is_ertn),
-        .exe_is_syscall(exe_is_sycall),
-        .exe_res_from_csr(exe_res_from_csr),
-        .exe_csr_wmask(exe_csr_wmask),
-        .exe_csr_wdata(exe_csr_wdata),
-        .exe_ex_adef(exe_ex_adef),
-        .exe_ex_brk(exe_ex_brk),
-        .exe_ex_ine(exe_ex_ine),
-        .exe_ex_ale(exe_ex_ale),
-        .exe_has_int(exe_has_int),
-        .exe_int_ecode(exe_int_ecode),
-        .exe_int_esubcode(exe_int_esubcode),
-        .exe_rj(exe_rj),
-        .exe_res_of_cnt(exe_res_of_cnt),
-        .exe_res_is_rj(exe_res_is_rj),
-        .exe_res_from_cnt(exe_res_from_cnt),
-        .exe_res_from_tid(exe_res_from_tid),
-        .exe_need_data_sram(exe_need_data_sram),
-        .exe_ex_ale_h(exe_ex_ale_h),
-        .exe_ex_ale_w(exe_ex_ale_w),
-        .exe_need_cancel(exe_need_cancel),
-        .exe_inst_tlbrd(exe_inst_tlbrd),
-        .exe_inst_tlbsrch(exe_inst_tlbsrch),
-        .exe_tlb_wr_en(exe_tlb_wr_en),
-        .exe_tlb_fill_en(exe_tlb_fill_en),
-        .exe_tlb_we(exe_tlb_we),
-        .exe_invtlb_asid(exe_invtlb_asid),
-        .exe_invtlb_op(exe_invtlb_op),
-        .exe_invtlb_va(exe_invtlb_va),
-        .exe_invtlb_valid(exe_invtlb_valid),
-        .exe_alu_op(exe_alu_op),
-        .exe_tlb_or_csr_we(exe_tlb_or_csr_we),
-        .exe_inst_tlb_ex(exe_inst_tlb_ex),
-        .exe_data_tlb_ex(data_tlb_ex),
+        .exe2_alu_result(exe2_alu_result),
+        .exe2_ref_we(exe2_ref_we),
+        .exe2_dram_re(exe2_dram_re),
+        .exe2_dram_we(exe2_dram_we),
+        .exe2_data_addr(exe2_data_addr),
+        .exe2_inst(exe2_inst),
+        .exe2_rd(exe2_rd),
+        //.exe2_br_taken(exe2_br_taken),
+        //.exe2_br_target(exe2_br_target),
+        .exe2_res_from_dram(exe2_res_from_dram),
+        .exe2_dram_waddr(exe2_alu_result),
+        .exe2_dram_wdata(exe2_dram_wdata),
+        .exe2_pc(exe2_pc),
+        .exe2_rdram_need_zero_extend(exe2_rdram_need_zero_extend),
+        .exe2_rdram_need_signed_extend(exe2_rdram_need_signed_extend),
+        .exe2_rdram_num(exe2_rdram_num),
+        .exe2_wdram_num(exe2_wdram_num),
+        .exe2_csr_num(exe2_csr_num),
+        .exe2_csr_we(exe2_csr_we),
+        .exe2_is_ertn(exe2_is_ertn),
+        .exe2_is_syscall(exe2_is_syscall),
+        .exe2_res_from_csr(exe2_res_from_csr),
+        .exe2_csr_wmask(exe2_csr_wmask),
+        .exe2_csr_wdata(exe2_csr_wdata),
+        .exe2_ex_adef(exe2_ex_adef),
+        .exe2_ex_brk(exe2_ex_brk),
+        .exe2_ex_ine(exe2_ex_ine),
+        .exe2_ex_ale(exe2_ex_ale),
+        .exe2_has_int(exe2_has_int),
+        .exe2_int_ecode(exe2_int_ecode),
+        .exe2_int_esubcode(exe2_int_esubcode),
+        .exe2_rj(exe2_rj),
+        .exe2_res_of_cnt(exe2_res_of_cnt),
+        .exe2_res_is_rj(exe2_res_is_rj),
+        .exe2_res_from_cnt(exe2_res_from_cnt),
+        .exe2_res_from_tid(exe2_res_from_tid),
+        .exe2_need_data_sram(exe2_need_data_sram),
+        .exe2_ex_ale_h(exe2_ex_ale_h),
+        .exe2_ex_ale_w(exe2_ex_ale_w),
+        .exe2_need_cancel(exe2_need_cancel),
+        .exe2_inst_tlbrd(exe2_inst_tlbrd),
+        .exe2_inst_tlbsrch(exe2_inst_tlbsrch),
+        .exe2_tlb_wr_en(exe2_tlb_wr_en),
+        .exe2_tlb_fill_en(exe2_tlb_fill_en),
+        .exe2_tlb_we(exe2_tlb_we),
+        .exe2_invtlb_asid(exe2_invtlb_asid),
+        .exe2_invtlb_op(exe2_invtlb_op),
+        .exe2_invtlb_va(exe2_invtlb_va),
+        .exe2_invtlb_valid(exe2_invtlb_valid),
+        .exe2_alu_op(exe2_alu_op),
+        .exe2_tlb_or_csr_we(exe2_tlb_or_csr_we),
+        .exe2_inst_tlb_ex(exe2_inst_tlb_ex),
+        .exe2_data_tlb_ex(data_tlb_ex),
         //.exe_csr_rdata(exe_csr_rdata),
         .mem_ref_we(mem_ref_we),
         .mem_alu_result(mem_alu_result),
@@ -821,7 +1180,8 @@ module core_top(
         .mem_alu_op(mem_alu_op),
         .mem_tlb_or_csr_we(mem_tlb_or_csr_we),
         .mem_inst_tlb_ex(mem_inst_tlb_ex),
-        .mem_data_tlb_ex(mem_data_tlb_ex)
+        .mem_data_tlb_ex(mem_data_tlb_ex),
+        .mem_inst(mem_inst)
     );
     //assign data_sram_addr=mem_alu_result;
 
@@ -829,40 +1189,42 @@ module core_top(
     wire data_tlb_or_csr_we;
 
     assign mem_dram_rdata=data_sram_rdata;
-    assign data_sram_wstrb=(wb_ex===1'b1||exe_ex_ale===1'b1||wb_is_ertn===1'b1 || data_tlb_ex != 3'b0)?    4'b0000:
-                        (exe_dram_we&&exe_wdram_num==0)? 4'b1111:
-                        (exe_dram_we&&exe_wdram_num==1&&data_sram_addr[1:0]==2'b00)?  4'b0001:
-                        (exe_dram_we&&exe_wdram_num==1&&data_sram_addr[1:0]==2'b01)?4'b0010:
-                        (exe_dram_we&&exe_wdram_num==1&&data_sram_addr[1:0]==2'b10)? 4'b0100:
-                        (exe_dram_we&&exe_wdram_num==1&&data_sram_addr[1:0]==2'b11)? 4'b1000:
-                        (exe_dram_we&&exe_wdram_num==2&&data_sram_addr[1:0]==2'b00)?4'b0011:
-                        (exe_dram_we&&exe_wdram_num==2&&data_sram_addr[1:0]==2'b01)?4'b0110:
-                        (exe_dram_we&&exe_wdram_num==2&&data_sram_addr[1:0]==2'b10)?4'b1100:   4'b0000;
+    assign data_sram_wstrb=(wb_ex===1'b1||exe2_ex_ale===1'b1||wb_is_ertn===1'b1 || data_tlb_ex != 3'b0)?    4'b0000:
+                        (exe2_dram_we&&exe2_wdram_num==0)? 4'b1111:
+                        (exe2_dram_we&&exe2_wdram_num==1&&data_sram_addr[1:0]==2'b00)?  4'b0001:
+                        (exe2_dram_we&&exe2_wdram_num==1&&data_sram_addr[1:0]==2'b01)?4'b0010:
+                        (exe2_dram_we&&exe2_wdram_num==1&&data_sram_addr[1:0]==2'b10)? 4'b0100:
+                        (exe2_dram_we&&exe2_wdram_num==1&&data_sram_addr[1:0]==2'b11)? 4'b1000:
+                        (exe2_dram_we&&exe2_wdram_num==2&&data_sram_addr[1:0]==2'b00)?4'b0011:
+                        (exe2_dram_we&&exe2_wdram_num==2&&data_sram_addr[1:0]==2'b01)?4'b0110:
+                        (exe2_dram_we&&exe2_wdram_num==2&&data_sram_addr[1:0]==2'b10)?4'b1100:   4'b0000;
 
-    assign data_sram_req=  data_req_valid & exe_need_data_sram & mem_allow_in &&(wb_ex!=1'b1) & (!(data_tlb_or_csr_we === 1'b1)) &(data_tlb_ex == 3'b0);
-    assign data_sram_size = exe_ex_ale_h ? 2'b1 :
-                            exe_ex_ale_w ? 2'b10 :  2'b0;
-    assign exe_addr_shake_ok = exe_need_data_sram ?  data_sram_req&&(data_sram_addr_ok===1'b1) :  1'b1;
+    assign data_sram_req=  data_req_valid & exe2_need_data_sram & mem_allow_in &&(wb_ex!=1'b1) & (!(data_tlb_or_csr_we === 1'b1)) &(data_tlb_ex == 3'b0);
+    assign data_sram_size = exe2_ex_ale_h ? 2'b1 :
+                            exe2_ex_ale_w ? 2'b10 :  2'b0;
+    assign exe2_addr_shake_ok = exe2_need_data_sram ?  data_sram_req&&(data_sram_addr_ok===1'b1) :  1'b1;
     assign mem_data_shake_ok = mem_need_data_sram ?  (data_sram_data_ok===1'b1) : 1'b1;
-    assign data_sram_wr = exe_dram_we;
+    assign data_sram_wr = exe2_dram_we;
     assign mem_need_and_data_ok = mem_need_data_sram && (data_sram_data_ok===1'b1);
    // assign data_sram_en=1'b1;
     //assign data_sram_wdata=mem_dram_wdata;
-    assign data_sram_wdata =  exe_wdram_num==0?  exe_dram_wdata:
-                             exe_wdram_num==1?   {4{exe_dram_wdata[7:0]}} :{2{exe_dram_wdata[15:0]}} ;
-    assign data_sram_addr=exe_dram_we? exe_dram_waddr: exe_alu_result;
+    assign data_sram_wdata =  exe2_wdram_num==0?  exe2_dram_wdata:
+                             exe2_wdram_num==1?   {4{exe2_dram_wdata[7:0]}} :{2{exe2_dram_wdata[15:0]}} ;
+    assign data_sram_addr=exe2_alu_result;
 
     wire [31:0] data_addr;   // 经过TLB转换后的地址
     wire data_dmw0_en;
     wire data_dmw1_en;
     wire [2:0]data_tlb_ex;
 
-    assign data_tlb_ex = ((csr_crmd_da && csr_crmd_pg==1'b0)|| data_dmw0_en || data_dmw1_en || exe_need_data_sram==1'b0) ? 3'h0 :
+    assign data_tlb_ex = ((csr_crmd_da && csr_crmd_pg==1'b0)|| data_dmw0_en || data_dmw1_en || exe2_need_data_sram==1'b0) ? 3'h0 :
                          (tlb_s1_found == 1'b0)                                              ? 3'h1 :
-                         (tlb_s1_v == 1'b0 && exe_is_ld)                                     ? 3'h2 :
-                         (tlb_s1_v == 1'b0 && exe_is_st)                                     ? 3'h3 :
+                         (tlb_s1_v == 1'b0 && exe2_is_ld)                                     ? 3'h2 :
+                         (tlb_s1_v == 1'b0 && exe2_is_st)                                     ? 3'h3 :
                          (tlb_s1_plv < csr_crmd_plv)                                         ? 3'h4 :
-                         (tlb_s1_d == 1'b0 && exe_is_st)                                     ? 3'h5 : 3'h0;
+                         (tlb_s1_d == 1'b0 && exe2_is_st)                                     ? 3'h5 : 3'h0;
+
+    // (debug removed)
 
     assign data_dmw0_en = csr_crmd_da == 1'b0 && csr_crmd_pg && ((csr_crmd_plv == 2'h3 && csr_dmw0_plv3)||(csr_crmd_plv == 2'h0 && csr_dmw0_plv0)) && data_sram_addr[31:29] == csr_dmw0_vseg;
     assign data_dmw1_en = csr_crmd_da == 1'b0 && csr_crmd_pg && ((csr_crmd_plv == 2'h3 && csr_dmw1_plv3)||(csr_crmd_plv == 2'h0 && csr_dmw1_plv0)) && data_sram_addr[31:29] == csr_dmw1_vseg;
@@ -884,6 +1246,7 @@ module core_top(
     wire [31:0] wb_dram_waddr;
     wire wb_dram_we;
     wire [31:0] wb_pc;
+    wire [1:0]wb_wdram_num;
     wire [1:0]wb_rdram_num;
     wire wb_rdram_need_zero_extend;
     wire wb_rdram_need_signed_extend;
@@ -939,6 +1302,7 @@ module core_top(
         .mem_dram_waddr(mem_dram_waddr),
         .mem_dram_we(mem_dram_we),
         .mem_pc(mem_pc),
+        .mem_wdram_num(mem_wdram_num),
         .mem_rdram_num(mem_rdram_num),
         .mem_rdram_need_zero_extend(mem_rdram_need_zero_extend),
         .mem_rdram_need_signed_extend(mem_rdram_need_signed_extend),
@@ -975,6 +1339,7 @@ module core_top(
         .mem_tlb_or_csr_we(mem_tlb_or_csr_we),
         .mem_inst_tlb_ex(mem_inst_tlb_ex),
         .mem_data_tlb_ex(mem_data_tlb_ex),
+        .mem_inst(mem_inst),
         //.mem_csr_rdata(mem_csr_rdata),
         .wb_rf_we(wb_rf_we),
         .wb_alu_result(wb_alu_result),
@@ -986,6 +1351,7 @@ module core_top(
         .wb_dram_waddr(wb_dram_waddr),
         .wb_dram_wdata(wb_dram_wdata),
         .wb_dram_we(wb_dram_we),
+        .wb_wdram_num(wb_wdram_num),
         .wb_pc(wb_pc),
         .wb_rdram_num(wb_rdram_num),
         .wb_rdram_need_signed_extend(wb_rdram_need_signed_extend),
@@ -1022,7 +1388,8 @@ module core_top(
         .wb_invtlb_valid(wb_invtlb_valid),
         .wb_tlb_or_csr_we(wb_tlb_or_csr_we),
         .wb_inst_tlb_ex(wb_inst_tlb_ex),
-        .wb_data_tlb_ex(wb_data_tlb_ex)
+        .wb_data_tlb_ex(wb_data_tlb_ex),
+        .wb_inst(wb_inst)
 
     );
 
@@ -1055,6 +1422,10 @@ module core_top(
 
     wire [4:0]rf_waddr;
     assign rf_waddr = wb_res_is_rj? wb_rj : wb_rd;
+`ifdef DIFFTEST_EN
+    wire [31:0] gp_regs_diff [31:0];
+    wire [831:0] csr_all_diff;
+`endif
     regfile rf(
         .raddr1(rf_raddr1),
         .raddr2(rf_raddr2),
@@ -1064,8 +1435,12 @@ module core_top(
         .waddr(rf_waddr),
         .wdata(rf_wdata),
         .we(rf_we)
+`ifdef DIFFTEST_EN
+        ,
+        .rf_regs_diff(gp_regs_diff)
+`endif
     );
-
+    
     assign id_src1=rf_rdata1;
     assign id_src2=rf_rdata2;
     assign debug0_wb_pc = wb_pc;
@@ -1075,13 +1450,13 @@ module core_top(
 
 
     //assign if_allow_in = inst_sram_data_ok==1'b0;
-    assign exe_ready_go=    (if_pc!=32'h1bfffffc && exe_pc==32'b0) ?                  1'b0:
-                            (wb_ex===1'b1)?                                            1'b0:
-                            (exe_alu_op == 5'd20 || exe_alu_op == 5'd21 || exe_alu_op == 5'd22 || exe_alu_op == 5'd23)?   div_completed :
-                            (EXE_ready_go == 1'b1) ?                                  1'b1 :
-                            exe_need_data_sram ? (data_sram_addr_ok===1'b1 && data_sram_req)||(data_tlb_ex!=3'b0) : 1'b1;
-    assign mem_ready_go=     (if_pc != 32'h1c000000&& if_pc!= 32'h1c000004 &&if_pc!=32'h1bfffffc && mem_pc==32'b0) ?       1'b0:
-                            (wb_ex===1'b1)?                                                 1'b0:
+    assign exe1_ready_go=   (wb_ex===1'b1)?                                            1'b0:
+                            (exe1_alu_op == 5'd20 || exe1_alu_op == 5'd21 || exe1_alu_op == 5'd22 || exe1_alu_op == 5'd23)?   div_done :
+                            1'b1;
+    assign exe2_ready_go=   (wb_ex===1'b1)?                                            1'b0:
+                            (EXE2_ready_go == 1'b1) ?                                  1'b1 :
+                            exe2_need_data_sram ? (data_sram_addr_ok===1'b1 && data_sram_req)||(data_tlb_ex!=3'b0) : 1'b1;
+    assign mem_ready_go=     (wb_ex===1'b1)?                                                 1'b0:
                             mem_need_data_sram ?  (data_sram_data_ok===1'b1||mem_data_tlb_ex != 3'b0) : 1'b1;
     assign pre_if_ready_go =(inst_sram_addr_ok && inst_sram_req)||(inst_tlb_ex != 2'b0);
     //assign if_ready_go =1'b1;
@@ -1089,22 +1464,22 @@ module core_top(
     //assign wb_ready_go=1'b1;
     assign if_ready_go = rst? 1'b1:
                          (IF_ready_go == 1'b1) ?     1'b1:
-                         //(if_inst_tlb_ex != 2'b0 && id_need_cancel == 2'b0) ?  1'b1 :
-                        (if_pc!=32'h1bfffffc&&inst_sram_data_ok==1'b0)? 1'b0 :
-                        (exe_ref_we&&exe_rd!=0&&((id_src1_from_ref&&(rf_raddr1==exe_rd))||(id_src2_from_ref&&(rf_raddr2==exe_rd))))? 1'b0 :
+                        (if_pc!=32'h1bfffffc&&real_inst_data_ok==1'b0)? 1'b0 :
+                        (exe1_ref_we&&exe1_rd!=0&&((id_src1_from_ref&&(rf_raddr1==exe1_rd))||(id_src2_from_ref&&(rf_raddr2==exe1_rd))))? 1'b0 :
+                        (exe2_ref_we&&exe2_rd!=0&&((id_src1_from_ref&&(rf_raddr1==exe2_rd))||(id_src2_from_ref&&(rf_raddr2==exe2_rd))))? 1'b0 :
                         (mem_ref_we&&mem_rd!=0&&((id_src1_from_ref&&(rf_raddr1==mem_rd))||(id_src2_from_ref&&(rf_raddr2==mem_rd))))?  1'b0:
                         (wb_rf_we&&wb_rd!=0&&((id_src1_from_ref&&(rf_raddr1==wb_rd))||(id_src2_from_ref&&(rf_raddr2==wb_rd))))?  1'b0  : 1'b1;
                         // (exe_csr_we&&(exe_csr_num==14'h4||exe_csr_num==14'd5||exe_csr_num==14'b0)) ?       1'b0:
                         // (mem_csr_we&&(mem_csr_num==14'h4||mem_csr_num==14'd5||mem_csr_num==14'b0)) ?       1'b0:
                         // (wb_csr_we&&(wb_csr_num==14'h4||wb_csr_num==14'd5||wb_csr_num==14'b0)) ?       1'b0:   1'b1;
     assign id_ready_go = rst? 1'b1:
-                        (ID_ready_go == 1'b1) ?      1'b1 :
                         (wb_ex===1'b1)? 1'b0:
-                        //(wb_is_ertn===1'b1) ? 1'b1:
-                        (id_pc==32'b0) ? 1'b0 :
-                        (exe_ref_we&&exe_rd!=0&&((id_src1_from_ref&&(rf_raddr1==exe_rd))||(id_src2_from_ref&&(rf_raddr2==exe_rd))))? 1'b0 :
+                        (exe1_div_is_doing)? 1'b0 :
+                        (exe1_ref_we&&exe1_rd!=0&&((id_src1_from_ref&&(rf_raddr1==exe1_rd))||(id_src2_from_ref&&(rf_raddr2==exe1_rd))))? 1'b0 :
+                        (exe2_ref_we&&exe2_rd!=0&&((id_src1_from_ref&&(rf_raddr1==exe2_rd))||(id_src2_from_ref&&(rf_raddr2==exe2_rd))))? 1'b0 :
                         (mem_ref_we&&mem_rd!=0&&((id_src1_from_ref&&(rf_raddr1==mem_rd))||(id_src2_from_ref&&(rf_raddr2==mem_rd))))?  1'b0:
-                        (wb_rf_we&&wb_rd!=0&&((id_src1_from_ref&&(rf_raddr1==wb_rd))||(id_src2_from_ref&&(rf_raddr2==wb_rd))))?  1'b0  : 1'b1;
+                        (wb_rf_we&&wb_rd!=0&&((id_src1_from_ref&&(rf_raddr1==wb_rd))||(id_src2_from_ref&&(rf_raddr2==wb_rd))))?  1'b0  :
+                        (ID_ready_go == 1'b1) ?      1'b1 : 1'b1;
                         // (exe_csr_we&&(exe_csr_num==14'h4||exe_csr_num==14'd5||exe_csr_num==14'b0)) ?       1'b0:
                         // (mem_csr_we&&(mem_csr_num==14'h4||mem_csr_num==14'd5||mem_csr_num==14'b0)) ?       1'b0:
                         // (wb_csr_we&&(wb_csr_num==14'h4||wb_csr_num==14'd5||wb_csr_num==14'b0)) ?       1'b0:   1'b1;
@@ -1112,7 +1487,8 @@ module core_top(
                         (wb_ex===1'b1)? 1'b0:
                         //(wb_is_ertn===1'b1) ? 1'b1:
                         (inst_sram_data_ok==1'b0)? 1'b0 :
-                        (exe_ref_we&&exe_rd!=0&&((id_src1_from_ref&&(rf_raddr1==exe_rd))||(id_src2_from_ref&&(rf_raddr2==exe_rd))))? 1'b0 :
+                        (exe1_ref_we&&exe1_rd!=0&&((id_src1_from_ref&&(rf_raddr1==exe1_rd))||(id_src2_from_ref&&(rf_raddr2==exe1_rd))))? 1'b0 :
+                        (exe2_ref_we&&exe2_rd!=0&&((id_src1_from_ref&&(rf_raddr1==exe2_rd))||(id_src2_from_ref&&(rf_raddr2==exe2_rd))))? 1'b0 :
                         (mem_ref_we&&mem_rd!=0&&((id_src1_from_ref&&(rf_raddr1==mem_rd))||(id_src2_from_ref&&(rf_raddr2==mem_rd))))?  1'b0:
                         (wb_rf_we&&wb_rd!=0&&((id_src1_from_ref&&(rf_raddr1==wb_rd))||(id_src2_from_ref&&(rf_raddr2==wb_rd))))?  1'b0  : 1'b1;
                         // (exe_csr_we&&(exe_csr_num==14'h4||exe_csr_num==14'd5||exe_csr_num==14'b0)) ?       1'b0:
@@ -1120,52 +1496,31 @@ module core_top(
                         // (wb_csr_we&&(wb_csr_num==14'h4||wb_csr_num==14'd5||wb_csr_num==14'b0)) ?       1'b0:   1'b1;
     assign pipline_is_not_stalled =rst? 1'b1:
                        // (wb_ex===1'b1)? 1'b1:
-                        (exe_ref_we&&exe_rd!=0&&((id_src1_from_ref&&(rf_raddr1==exe_rd))||(id_src2_from_ref&&(rf_raddr2==exe_rd))))? 1'b0 :
+                        (exe1_ref_we&&exe1_rd!=0&&((id_src1_from_ref&&(rf_raddr1==exe1_rd))||(id_src2_from_ref&&(rf_raddr2==exe1_rd))))? 1'b0 :
+                        (exe2_ref_we&&exe2_rd!=0&&((id_src1_from_ref&&(rf_raddr1==exe2_rd))||(id_src2_from_ref&&(rf_raddr2==exe2_rd))))? 1'b0 :
                         (mem_ref_we&&mem_rd!=0&&((id_src1_from_ref&&(rf_raddr1==mem_rd))||(id_src2_from_ref&&(rf_raddr2==mem_rd))))?  1'b0:
                         (wb_rf_we&&wb_rd!=0&&((id_src1_from_ref&&(rf_raddr1==wb_rd))||(id_src2_from_ref&&(rf_raddr2==wb_rd))))?  1'b0  : 1'b1;
                         // (exe_csr_we&&(exe_csr_num==14'h4||exe_csr_num==14'd5||exe_csr_num==14'b0)) ?       1'b0:
                         // (mem_csr_we&&(mem_csr_num==14'h4||mem_csr_num==14'd5||mem_csr_num==14'b0)) ?       1'b0:
                         // (wb_csr_we&&(wb_csr_num==14'h4||wb_csr_num==14'd5||wb_csr_num==14'b0)) ?       1'b0:   1'b1;
     assign wb_allow_in = 1'b1;
-    // assign mem_allow_in = wb_allow_in && (~(mem_ready_go===1'b0));
-    // assign exe_allow_in = mem_allow_in && (~(exe_ready_go===1'b0));
-    // assign id_allow_in = exe_allow_in && (~(id_ready_go===1'b0));
-    // assign if_allow_in = id_allow_in && (~(if_ready_go===1'b0));
-    if_allow_in_state If_allow_in(
+    assign mem_allow_in = wb_allow_in && !(mem_ready_go===1'b0);
+    assign exe2_allow_in = mem_allow_in && !(exe2_ready_go===1'b0);
+    assign exe1_allow_in = exe2_allow_in && !(exe1_ready_go===1'b0);
+    assign id_allow_in = exe1_allow_in && !(id_ready_go===1'b0) && !exe1_dropped && !btb_mispredict;
+
+    if_allow_in_state u_if_allow_in_state(
         .clk(clk),
         .rst(rst),
         .pre_if_ready_go(pre_if_ready_go),
         .if_ready_go(if_ready_go),
         .id_allow_in(id_allow_in),
+        .redirect(wb_ex || wb_is_ertn),
+        .data_ok(real_inst_data_ok),
         .if_allow_in(if_allow_in)
     );
-    id_allow_in_state Id_allow_in(
-        .clk(clk),
-        .rst(rst),
-        .if_ready_go(if_ready_go),
-        .id_ready_go(id_ready_go),
-        .exe_allow_in(exe_allow_in),
-        .id_allow_in(id_allow_in)
-    );
-    exe_allow_in_state Exe_allow_in(
-        .clk(clk),
-        .rst(rst),
-        .id_ready_go(id_ready_go),
-        .exe_ready_go(exe_ready_go),
-        .wb_ex(wb_ex),
-        .mem_allow_in(mem_allow_in),
-        .exe_allow_in(exe_allow_in)
-    );
-    mem_allow_in_state Mem_allow_in(
-        .clk(clk),
-        .rst(rst),
-        .exe_ready_go(exe_ready_go),
-        .mem_ready_go(mem_ready_go),
-        .wb_allow_in(wb_allow_in),
-        .mem_allow_in(mem_allow_in)
-    );
 
-    wire wb_ex;//是否是异常
+    wire wb_ex;//是否是异常 (driven by trap_unit.trap_ex_valid via .trap_ex_valid(wb_ex))
     wire [5:0]wb_ecode;
     wire [7:0]wb_esubcode;//异常类型的编号
     wire trap_flush;
@@ -1175,7 +1530,8 @@ module core_top(
     trap_unit u_trap_unit(
         .clk(clk),
         .rst(rst),
-        .wb_has_int(wb_has_int),
+        // Re-check IE at WB: interrupt detected in ID may have IE cleared by now
+        .wb_has_int(wb_has_int && csr_crmd_ie),
         .wb_int_ecode(wb_int_ecode),
         .wb_int_esubcode(wb_int_esubcode),
         .wb_ex_adef(wb_ex_adef),
@@ -1317,6 +1673,7 @@ module core_top(
     CSRREG csr(
         .clk(clk),//
         .rst(rst),//
+        .timer_advance(!exe1_dropped),
         .csr_num(csr_num),//
         .csr_we(wb_csr_we),//
         .csr_wmask(wb_csr_wmask),//
@@ -1331,7 +1688,7 @@ module core_top(
         .csr_wvalue(wb_csr_wdata),//
         .wb_pc(wb_pc),//
         .csr_era_pc(csr_era_pc),
-        .wb_ex_ale(wb_ex_alw),
+        .wb_ex_ale(wb_ex_ale),
         .wb_ex_ale_addr(wb_ex_ale_addr),
         .csr_estat_is(csr_estat_is),
         .csr_ecfg_lie(csr_ecfg_lie),
@@ -1430,15 +1787,20 @@ module core_top(
         .csr_inst_tlb_refill(csr_inst_tlb_refill),
         .csr_data_tlb_refill(csr_data_tlb_refill),
         .csr_tlbrentry(csr_tlbrentry)
+`ifdef DIFFTEST_EN
+        ,
+        .csr_all_diff(csr_all_diff)
+`endif
     );
 
     Inst_ram_state inst_ram_state(
         .clk(clk),
         .rst(rst),
         .req(inst_sram_req),
-        .data_ok(inst_sram_data_ok),
+        .data_ok(real_inst_data_ok),
         .addr_ok(inst_sram_addr_ok),
-        .inst_req_valid(inst_req_valid)          //output,等于0表示�???1个请求已经发出，不能再发请求
+        .flush(wb_ex || wb_is_ertn),
+        .inst_req_valid(inst_req_valid)
     );
 
     wire Inst_sram_req;
@@ -1453,11 +1815,15 @@ module core_top(
         .inst_sram_addr_ok(inst_sram_addr_ok),
         .if_ready_go(if_ready_go),
         .id_allow_in(id_allow_in),
-        .id_br_taken(id_br_taken),
+        .id_br_taken(id_br_taken_safe),
+        .id_is_ertn(id_is_ertn),
         .pre_if_ready_go(pre_if_ready_go),
         .if_allow_in(if_allow_in),
-        .id_need_cancel(id_need_cancel)          //output;等于1表示if-id级的指令�???要取�???
+        .id_need_cancel(id_need_cancel_raw)     // raw output from state machine
     );
+
+    wire [1:0] id_need_cancel;
+    assign id_need_cancel = ((id_br_taken_safe && !btb_hit_d1) || br_need_cancel) ? 2'b10 : id_need_cancel_raw;
 
     Data_ram_state data_ram_state(
         .clk(clk),
@@ -1471,8 +1837,8 @@ module core_top(
     id_next_inst_cancel id_next_inst_cancel(
         .clk(clk),
         .rst(rst),
-        .id_br_taken(id_br_taken),
-        .if_ready_go(if_ready_go),
+        .id_br_taken(id_br_taken_safe),
+        .id_is_ertn(id_is_ertn),
         .id_allow_in(id_allow_in),
         .pre_if_ready_go(pre_if_ready_go),
         .if_allow_in(if_allow_in),
@@ -1487,19 +1853,19 @@ module core_top(
         .IF_ready_go(IF_ready_go)
     );
 
-    EXE_readygo_state Exe_readygo_state(
+    EXE2_readygo_state Exe2_readygo_state(
         .rst(rst),
         .clk(clk),
         .mem_allow_in(mem_allow_in),
-        .exe_ready_go(exe_ready_go),
-        .EXE_ready_go(EXE_ready_go)
+        .exe2_ready_go(exe2_ready_go),
+        .EXE2_ready_go(EXE2_ready_go)
     );
 
     ID_readygo_state Id_readygo_state(
         .rst(rst),
         .clk(clk),
         .id_ready_go(id_ready_go),
-        .exe_allow_in(exe_allow_in),
+        .exe_allow_in(exe1_allow_in),
         .ID_ready_go(ID_ready_go)
     );
 
@@ -1635,6 +2001,16 @@ module core_top(
     assign tlb_w_vppn =  csr_tlbehi;
     assign tlb_w_ps = csr_tlbidx_ps;
     assign tlb_w_asid = csr_asid_asid;
+    always @(posedge clk) begin
+        if (!rst && wb_tlb_fill_en)
+            $display("[TLB-FILL] %0t: w_index=%d w_vppn=%h w_ps=%h w_asid=%h w_e=%b w_g=%b ne=%b idx=%d",
+                $time, tlb_w_index, tlb_w_vppn, tlb_w_ps, tlb_w_asid, tlb_w_e, tlb_w_g, csr_tlbidx_ne, csr_tlbidx_index);
+    end
+    always @(posedge clk) begin
+        if (!rst && wb_inst_tlbrd)
+            $display("[TLB-RD]  %0t: ne=%b ps=%h idx=%d tlbehi_vppn=%h r_e=%b r_ps=%h asid=%h",
+                $time, csr_tlbidx_ne, csr_tlbidx_ps, csr_tlbidx_index, csr_tlbehi, tlb_r_e, tlb_r_ps, csr_asid_asid);
+    end
     assign tlb_w_g = csr_tlbelo0_g & csr_tlbelo1_g;
     assign tlb_w_ppn0 = csr_tlbelo0_ppn;
     assign tlb_w_plv0 = csr_tlbelo0_plv;
@@ -1662,6 +2038,7 @@ module core_top(
 
     tlb u_tlb (
     .clk(clk),
+    .rst(rst),
 
     //  search ports0(for fetch)
     .s0_vppn(tlb_s0_vppn),            //虚拟访存地址�?????31....13�?????
@@ -1804,6 +2181,247 @@ module core_top(
     assign csr_tlbidx_index_we = (wb_inst_tlbsrch && tlb_s2_found);
     assign csr_tlbidx_index_wvalue  = tlb_s2_index;
 
+    // ============================================================
+    // Pipeline stall debug outputs
+    // ============================================================
+    assign debug_id_allow_in     = id_allow_in;
+    assign debug_id_ready_go     = id_ready_go;
+    assign debug_exe1_allow_in   = exe1_allow_in;
+    assign debug_exe2_allow_in   = exe2_allow_in;
+    assign debug_mem_allow_in    = mem_allow_in;
+    assign debug_if_ready_go     = if_ready_go;
+    assign debug_pipe_stalled    = ~pipline_is_not_stalled;
+    assign debug_wb_ex           = wb_ex;
+    assign debug_id_pc           = id_pc;
+    assign debug_id_inst         = id_inst;
+    assign debug_id_rj           = id_rj;
+    assign debug_id_rk           = id_rk;
+    assign debug_id_rd           = id_rd;
+    assign debug_id_src1_from_ref = id_src1_from_ref;
+    assign debug_id_src2_from_ref = id_src2_from_ref;
+    assign debug_exe2_rd         = exe2_rd;
+    assign debug_exe2_ref_we     = exe2_ref_we;
+    assign debug_mem_rd          = mem_rd;
+    assign debug_mem_ref_we      = mem_ref_we;
+    assign debug_wb_rd           = wb_rd;
+    assign debug_wb_rf_we_dbg    = wb_rf_we;
 
+`ifdef DIFFTEST_EN
+    // ============================================================
+    // Difftest signal extraction and DPI module integration
+    // ============================================================
+
+    // WB-stage difftest signals
+    wire        wb_valid;
+    wire        wb_is_load;
+    wire        wb_is_store;
+    wire        wb_csr_rstat;
+    wire        wb_is_tlbfill;
+    wire [3:0]  wb_tlbfill_index;
+
+    assign wb_valid        = (wb_pc != 32'h1bfffffc) && (wb_pc != 32'b0) && !wb_need_cancel;
+    assign wb_is_load      = (wb_dram_we == 1'b0) && (wb_rdram_num != 2'b0 || wb_res_from_dram);
+    assign wb_is_store     = (wb_dram_we == 1'b1);
+    assign wb_csr_rstat    = (wb_csr_we == 1'b0) && (wb_csr_num == 14'h5) && wb_valid;
+    assign wb_is_tlbfill   = wb_tlb_fill_en && wb_valid;
+    assign wb_tlbfill_index = csr_timer_64[3:0];
+
+    // cmt_* staging registers (1-cycle delay)
+    reg         cmt_valid;
+    reg         cmt_cnt_instr;
+    reg [63:0]  cmt_stable_counter;
+    reg         cmt_inst_ld_en;
+    reg         cmt_inst_st_en;
+    reg [31:0]  cmt_memvis_paddr;
+    reg [31:0]  cmt_memvis_vaddr;
+    reg [31:0]  cmt_memvis_data;
+    reg         cmt_csr_rstat_en;
+    // cmt_csr_all removed: DifftestCSRRegState connects to wire csr_all_diff directly
+    // to avoid NBA race with CSR register writes (wb_csr_we updates CSR at same posedge)
+    reg         cmt_wen;
+    reg [7:0]   cmt_wdest;
+    reg [31:0]  cmt_wdata;
+    reg [31:0]  cmt_pc;
+    reg [31:0]  cmt_inst;
+    reg         cmt_ex;
+    reg         cmt_is_ertn;
+    reg [5:0]   cmt_ecode;
+    reg         cmt_is_tlbfill;
+    reg [3:0]   cmt_tlbfill_index;
+
+    reg         trap;
+    reg [7:0]   trap_code;
+    reg [63:0]  cycleCnt;
+    reg [63:0]  instrCnt;
+
+    always @(posedge aclk) begin
+        if (!aresetn) begin
+            {cmt_valid, cmt_cnt_instr, cmt_inst_ld_en, cmt_inst_st_en,
+             cmt_csr_rstat_en, cmt_wen, cmt_ex, cmt_is_ertn, cmt_is_tlbfill} <= 0;
+            cmt_stable_counter <= 64'd0;
+            {cmt_memvis_paddr, cmt_memvis_vaddr, cmt_memvis_data} <= 0;
+            {cmt_wdest, cmt_wdata, cmt_pc, cmt_inst} <= 0;
+            {cmt_ecode, cmt_tlbfill_index} <= 0;
+            {trap, trap_code, cycleCnt, instrCnt} <= 0;
+        end else if (~trap) begin
+            cmt_valid           <= wb_valid && !wb_ex;
+            cmt_cnt_instr       <= wb_res_from_cnt;
+            cmt_stable_counter  <= csr_timer_64;
+            cmt_inst_ld_en      <= wb_is_load;
+            cmt_inst_st_en      <= wb_is_store;
+            cmt_memvis_paddr    <= wb_data_addr;
+            cmt_memvis_vaddr    <= wb_data_addr;
+            // Mask store data to actual size with correct byte lane alignment
+            // st.b: 1 byte at addr[1:0] lane; st.h: 2 bytes at addr[1] halfword
+            cmt_memvis_data     <= (wb_wdram_num == 2'b01) ? ({24'b0, wb_dram_wdata[7:0]} << (8 * wb_data_addr[1:0])) :
+                                   (wb_wdram_num == 2'b10) ? ({16'b0, wb_dram_wdata[15:0]} << (8 * {wb_data_addr[1], 1'b0})) :
+                                   wb_dram_wdata;
+            cmt_csr_rstat_en    <= wb_csr_rstat;
+            cmt_wen             <= wb_rf_we;
+            cmt_wdest           <= {3'd0, wb_rd};
+            cmt_wdata           <= rf_wdata;
+            cmt_pc              <= debug0_wb_pc;
+            cmt_inst            <= wb_inst;
+            cmt_ex              <= wb_valid && wb_ex;
+            cmt_is_ertn         <= wb_is_ertn;
+            cmt_ecode           <= wb_ecode;
+            cmt_is_tlbfill      <= wb_is_tlbfill;
+            cmt_tlbfill_index   <= wb_tlbfill_index;
+            trap                <= 1'b0;
+            trap_code           <= gp_regs_diff[10][7:0];
+            cycleCnt            <= cycleCnt + 1;
+            instrCnt            <= instrCnt + (wb_valid ? 1 : 0);
+        end
+    end
+
+    // Difftest DPI module instantiations
+    DifftestInstrCommit DifftestInstrCommit(
+        .clock              (aclk               ),
+        .coreid             (0                  ),
+        .index              (0                  ),
+        .valid              (cmt_valid          ),
+        .pc                 (cmt_pc             ),
+        .instr              (cmt_inst           ),
+        .skip               (0                  ),
+        .is_TLBFILL         (cmt_is_tlbfill     ),
+        .TLBFILL_index      (cmt_tlbfill_index  ),
+        .is_CNTinst         (cmt_cnt_instr      ),
+        .timer_64_value     (cmt_stable_counter ),
+        .wen                (cmt_wen            ),
+        .wdest              (cmt_wdest          ),
+        .wdata              (cmt_wdata          ),
+        .csr_rstat          (cmt_csr_rstat_en   ),
+        .csr_data           (cmt_wdata          )
+    );
+
+    DifftestExcpEvent DifftestExcpEvent(
+        .clock              (aclk               ),
+        .coreid             (0                  ),
+        .excp_valid         (cmt_ex             ),
+        .eret               (cmt_is_ertn        ),
+        .intrNo             (csr_all_diff[716:706]),
+        .cause              (cmt_ecode          ),
+        .exceptionPC        (cmt_pc             ),
+        .exceptionInst      (cmt_inst           )
+    );
+
+    DifftestTrapEvent DifftestTrapEvent(
+        .clock              (aclk               ),
+        .coreid             (0                  ),
+        .valid              (trap               ),
+        .code               (trap_code          ),
+        .pc                 (cmt_pc             ),
+        .cycleCnt           (cycleCnt           ),
+        .instrCnt           (instrCnt           )
+    );
+
+    DifftestStoreEvent DifftestStoreEvent(
+        .clock              (aclk               ),
+        .coreid             (0                  ),
+        .index              (0                  ),
+        .valid              (cmt_inst_st_en     ),
+        .storePAddr         (cmt_memvis_paddr   ),
+        .storeVAddr         (cmt_memvis_vaddr   ),
+        .storeData          (cmt_memvis_data    )
+    );
+
+    DifftestLoadEvent DifftestLoadEvent(
+        .clock              (aclk               ),
+        .coreid             (0                  ),
+        .index              (0                  ),
+        .valid              (cmt_inst_ld_en     ),
+        .paddr              (cmt_memvis_paddr   ),
+        .vaddr              (cmt_memvis_vaddr   )
+    );
+
+    DifftestCSRRegState DifftestCSRRegState(
+        .clock              (aclk               ),
+        .coreid             (0                  ),
+        .crmd               (csr_all_diff[831:800]),
+        .prmd               (csr_all_diff[799:768]),
+        .euen               (0                  ),
+        .ecfg               (csr_all_diff[767:736]),
+        .estat              (csr_all_diff[735:704]),
+        .era                (csr_all_diff[703:672]),
+        .badv               (csr_all_diff[671:640]),
+        .eentry             (csr_all_diff[639:608]),
+        .tlbidx             (csr_all_diff[607:576]),
+        .tlbehi             (csr_all_diff[575:544]),
+        .tlbelo0            (csr_all_diff[543:512]),
+        .tlbelo1            (csr_all_diff[511:480]),
+        .asid               (csr_all_diff[479:448]),
+        .pgdl               (csr_all_diff[447:416]),
+        .pgdh               (csr_all_diff[415:384]),
+        .save0              (csr_all_diff[383:352]),
+        .save1              (csr_all_diff[351:320]),
+        .save2              (csr_all_diff[319:288]),
+        .save3              (csr_all_diff[287:256]),
+        .tid                (csr_all_diff[255:224]),
+        .tcfg               (csr_all_diff[223:192]),
+        .tval               (csr_all_diff[191:160]),
+        .ticlr              (csr_all_diff[159:128]),
+        .llbctl             (csr_all_diff[127:96]),
+        .tlbrentry          (csr_all_diff[95:64]),
+        .dmw0               (csr_all_diff[63:32]),
+        .dmw1               (csr_all_diff[31:0])
+    );
+
+    DifftestGRegState DifftestGRegState(
+        .clock              (aclk               ),
+        .coreid             (0                  ),
+        .gpr_0              (0                  ),
+        .gpr_1              (gp_regs_diff[1]    ),
+        .gpr_2              (gp_regs_diff[2]    ),
+        .gpr_3              (gp_regs_diff[3]    ),
+        .gpr_4              (gp_regs_diff[4]    ),
+        .gpr_5              (gp_regs_diff[5]    ),
+        .gpr_6              (gp_regs_diff[6]    ),
+        .gpr_7              (gp_regs_diff[7]    ),
+        .gpr_8              (gp_regs_diff[8]    ),
+        .gpr_9              (gp_regs_diff[9]    ),
+        .gpr_10             (gp_regs_diff[10]   ),
+        .gpr_11             (gp_regs_diff[11]   ),
+        .gpr_12             (gp_regs_diff[12]   ),
+        .gpr_13             (gp_regs_diff[13]   ),
+        .gpr_14             (gp_regs_diff[14]   ),
+        .gpr_15             (gp_regs_diff[15]   ),
+        .gpr_16             (gp_regs_diff[16]   ),
+        .gpr_17             (gp_regs_diff[17]   ),
+        .gpr_18             (gp_regs_diff[18]   ),
+        .gpr_19             (gp_regs_diff[19]   ),
+        .gpr_20             (gp_regs_diff[20]   ),
+        .gpr_21             (gp_regs_diff[21]   ),
+        .gpr_22             (gp_regs_diff[22]   ),
+        .gpr_23             (gp_regs_diff[23]   ),
+        .gpr_24             (gp_regs_diff[24]   ),
+        .gpr_25             (gp_regs_diff[25]   ),
+        .gpr_26             (gp_regs_diff[26]   ),
+        .gpr_27             (gp_regs_diff[27]   ),
+        .gpr_28             (gp_regs_diff[28]   ),
+        .gpr_29             (gp_regs_diff[29]   ),
+        .gpr_30             (gp_regs_diff[30]   ),
+        .gpr_31             (gp_regs_diff[31]   )
+    );
+`endif
 
 endmodule

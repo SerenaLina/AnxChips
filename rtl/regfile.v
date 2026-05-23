@@ -10,8 +10,21 @@ module regfile(
     input  wire        we,       //write enable, HIGH valid
     input  wire [ 4:0] waddr,
     input  wire [31:0] wdata
+`ifdef DIFFTEST_EN
+    ,
+    output wire [31:0] rf_regs_diff [31:0]
+`endif
 );
 reg [31:0] rf[31:0];
+
+`ifdef DIFFTEST_EN
+genvar i;
+generate
+    for (i = 0; i < 32; i = i + 1) begin : gen_rf_diff
+        assign rf_regs_diff[i] = rf[i];
+    end
+endgenerate
+`endif
 
 //WRITE
 always @(posedge clk) begin
