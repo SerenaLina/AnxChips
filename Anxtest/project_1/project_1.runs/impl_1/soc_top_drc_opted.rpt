@@ -1,0 +1,63 @@
+Copyright 1986-2022 Xilinx, Inc. All Rights Reserved. Copyright 2022-2023 Advanced Micro Devices, Inc. All Rights Reserved.
+---------------------------------------------------------------------------------------------------------------------------------------------
+| Tool Version : Vivado v.2023.2 (win64) Build 4029153 Fri Oct 13 20:14:34 MDT 2023
+| Date         : Sun May 24 16:38:41 2026
+| Host         : DESKTOP-31GR4GJ running 64-bit major release  (build 9200)
+| Command      : report_drc -file soc_top_drc_opted.rpt -pb soc_top_drc_opted.pb -rpx soc_top_drc_opted.rpx
+| Design       : soc_top
+| Device       : xc7a35tfgg484-1
+| Speed File   : -1
+| Design State : Synthesized
+---------------------------------------------------------------------------------------------------------------------------------------------
+
+Report DRC
+
+Table of Contents
+-----------------
+1. REPORT SUMMARY
+2. REPORT DETAILS
+
+1. REPORT SUMMARY
+-----------------
+            Netlist: netlist
+          Floorplan: design_1
+      Design limits: <entire design considered>
+           Ruledeck: default
+             Max violations: <unlimited>
+             Violations found: 3
++----------+----------+-----------------------------------------------------+------------+
+| Rule     | Severity | Description                                         | Violations |
++----------+----------+-----------------------------------------------------+------------+
+| BIVC-1   | Error    | Bank IO standard Vcc                                | 1          |
+| PLCK-87  | Error    | Clock Placer Checks                                 | 1          |
+| CFGBVS-1 | Warning  | Missing CFGBVS and CONFIG_VOLTAGE Design Properties | 1          |
++----------+----------+-----------------------------------------------------+------------+
+
+2. REPORT DETAILS
+-----------------
+BIVC-1#1 Error
+Bank IO standard Vcc  - IOBank:34
+Conflicting Vcc voltages in bank 34. For example, the following two ports in this bank have conflicting VCCOs:  
+clk_candidates[11] (LVCMOS18, requiring VCCO=1.800) and clk_candidates[8] (LVCMOS33, requiring VCCO=3.300)
+Related violations: <none>
+
+PLCK-87#1 Error
+Clock Placer Checks  
+IO/clock placer failed to collectively place all IOs and clock instances. This is likely due to design requirements or user constraints specified in the constraint file such as IO standards, bank/voltage/DCI/VREF specifications, together with the part and package being used for the implementation. Please check the above for any possible conflicts.
+
+Related violations: <none>
+
+CFGBVS-1#1 Warning
+Missing CFGBVS and CONFIG_VOLTAGE Design Properties  
+Neither the CFGBVS nor CONFIG_VOLTAGE voltage property is set in the current_design.  Configuration bank voltage select (CFGBVS) must be set to VCCO or GND, and CONFIG_VOLTAGE must be set to the correct configuration voltage, in order to determine the I/O voltage support for the pins in bank 0.  It is suggested to specify these either using the 'Edit Device Properties' function in the GUI or directly in the XDC file using the following syntax:
+
+ set_property CFGBVS value1 [current_design]
+ #where value1 is either VCCO or GND
+
+ set_property CONFIG_VOLTAGE value2 [current_design]
+ #where value2 is the voltage provided to configuration bank 0
+
+Refer to the device configuration user guide for more information.
+Related violations: <none>
+
+

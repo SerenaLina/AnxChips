@@ -29,15 +29,16 @@ module dcache_two_way(
     input  wire [31:0]  mem_rdata
 );
     localparam S_IDLE       = 4'd0;
-    localparam S_HIT_RESP   = 4'd1;
-    localparam S_UNC_REQ    = 4'd2;
-    localparam S_UNC_WAIT   = 4'd3;
-    localparam S_WB_REQ     = 4'd4;
-    localparam S_WB_WAIT    = 4'd5;
-    localparam S_REF_REQ    = 4'd6;
-    localparam S_REF_WAIT   = 4'd7;
-    localparam S_REF_RESP   = 4'd8;
-    localparam S_CACOP_RESP = 4'd9;
+    localparam S_LOOKUP     = 4'd1;
+    localparam S_HIT_RESP   = 4'd2;
+    localparam S_UNC_REQ    = 4'd3;
+    localparam S_UNC_WAIT   = 4'd4;
+    localparam S_WB_REQ     = 4'd5;
+    localparam S_WB_WAIT    = 4'd6;
+    localparam S_REF_REQ    = 4'd7;
+    localparam S_REF_WAIT   = 4'd8;
+    localparam S_REF_RESP   = 4'd9;
+    localparam S_CACOP_RESP = 4'd10;
 
     reg [3:0] state;
     reg [7:0] req_index;
@@ -52,39 +53,47 @@ module dcache_two_way(
     reg [1:0] req_cacop_code;
     reg req_cacop_way;
     reg req_way;
-    reg req_hit;
-    reg req_hit_way;
     reg req_victim_valid;
     reg req_victim_dirty;
     reg [19:0] req_victim_tag;
     reg [127:0] req_victim_line;
     reg [1:0] beat;
-    reg [127:0] refill_line;
     reg [31:0] resp_data;
-    reg [127:0] line_after_store;
     reg [31:0] mem_wdata_r;
 
-    reg valid0 [0:255];
-    reg valid1 [0:255];
-    reg dirty0 [0:255];
-    reg dirty1 [0:255];
-    reg [19:0] tag0 [0:255];
-    reg [19:0] tag1 [0:255];
-    reg [127:0] data0 [0:255];
-    reg [127:0] data1 [0:255];
-    reg used [0:255];
+    reg [255:0] valid0;
+    reg [255:0] valid1;
+    reg [255:0] dirty0;
+    reg [255:0] dirty1;
+    reg [255:0] used;
 
-    wire [19:0] req_tag_now = paddr[31:12];
-    wire hit0_now = valid0[index] && tag0[index] == req_tag_now;
-    wire hit1_now = valid1[index] && tag1[index] == req_tag_now;
-    wire hit_now = hit0_now || hit1_now;
-    wire hit_way_now = hit1_now;
-    wire replace_way_now = valid0[index] == 1'b0 ? 1'b0 :
-                           valid1[index] == 1'b0 ? 1'b1 : ~used[index];
-    wire victim_valid_now = replace_way_now ? valid1[index] : valid0[index];
-    wire victim_dirty_now = replace_way_now ? dirty1[index] : dirty0[index];
-    wire [19:0] victim_tag_now = replace_way_now ? tag1[index] : tag0[index];
-    wire [127:0] victim_line_now = replace_way_now ? data1[index] : data0[index];
+    wire ram_lookup = (state == S_IDLE) && req && (!uncached || is_cacop);
+    wire [7:0] lookup_index = index;
+
+    wire [31:0] data0_word0;
+    wire [31:0] data0_word1;
+    wire [31:0] data0_word2;
+    wire [31:0] data0_word3;
+    wire [31:0] data1_word0;
+    wire [31:0] data1_word1;
+    wire [31:0] data1_word2;
+    wire [31:0] data1_word3;
+    wire [19:0] tag0_dout;
+    wire [19:0] tag1_dout;
+
+    wire [127:0] data0_line = {data0_word3, data0_word2, data0_word1, data0_word0};
+    wire [127:0] data1_line = {data1_word3, data1_word2, data1_word1, data1_word0};
+
+    wire hit0 = valid0[req_index] && tag0_dout == req_paddr[31:12];
+    wire hit1 = valid1[req_index] && tag1_dout == req_paddr[31:12];
+    wire hit = hit0 || hit1;
+    wire hit_way = hit1;
+    wire replace_way = valid0[req_index] == 1'b0 ? 1'b0 :
+                       valid1[req_index] == 1'b0 ? 1'b1 : ~used[req_index];
+    wire victim_valid = replace_way ? valid1[req_index] : valid0[req_index];
+    wire victim_dirty = replace_way ? dirty1[req_index] : dirty0[req_index];
+    wire [19:0] victim_tag = replace_way ? tag1_dout : tag0_dout;
+    wire [127:0] victim_line = replace_way ? data1_line : data0_line;
 
     function [31:0] select_word;
         input [127:0] line;
@@ -95,21 +104,6 @@ module dcache_two_way(
                 2'd1: select_word = line[63:32];
                 2'd2: select_word = line[95:64];
                 default: select_word = line[127:96];
-            endcase
-        end
-    endfunction
-
-    function [127:0] put_word;
-        input [127:0] line;
-        input [1:0] word;
-        input [31:0] data;
-        begin
-            put_word = line;
-            case (word)
-                2'd0: put_word[31:0] = data;
-                2'd1: put_word[63:32] = data;
-                2'd2: put_word[95:64] = data;
-                default: put_word[127:96] = data;
             endcase
         end
     endfunction
@@ -126,19 +120,82 @@ module dcache_two_way(
         end
     endfunction
 
-    function [127:0] merge_line_store;
-        input [127:0] line;
-        input [1:0] word;
-        input [31:0] data;
-        input [3:0] strb;
-        reg [31:0] old_word;
-        reg [31:0] new_word;
-        begin
-            old_word = select_word(line, word);
-            new_word = merge_word(old_word, data, strb);
-            merge_line_store = put_word(line, word, new_word);
-        end
-    endfunction
+    wire [127:0] hit_line = hit_way ? data1_line : data0_line;
+    wire [31:0] hit_word = select_word(hit_line, req_word);
+    wire [31:0] hit_store_word = merge_word(hit_word, req_wdata, req_wstrb);
+    wire [31:0] refill_write_word = (req_op && beat == req_word) ? merge_word(mem_rdata, req_wdata, req_wstrb) : mem_rdata;
+
+    wire lookup_store_hit = (state == S_LOOKUP) && !req_is_cacop && hit && req_op;
+    wire refill_write = (state == S_REF_WAIT) && mem_data_ok;
+    wire tag_write = refill_write && (beat == 2'd3);
+
+    wire [7:0] data_addr = (lookup_store_hit || refill_write) ? req_index : lookup_index;
+    wire [7:0] tag_addr = tag_write ? req_index : lookup_index;
+    wire [31:0] bank_dina = lookup_store_hit ? req_wdata : refill_write_word;
+
+    wire store_way0 = lookup_store_hit && !hit_way;
+    wire store_way1 = lookup_store_hit &&  hit_way;
+    wire refill_way0 = refill_write && !req_way;
+    wire refill_way1 = refill_write &&  req_way;
+
+    wire [3:0] data0_we0 = (store_way0 && req_word == 2'd0) ? req_wstrb :
+                           (refill_way0 && beat == 2'd0)   ? 4'hf : 4'h0;
+    wire [3:0] data0_we1 = (store_way0 && req_word == 2'd1) ? req_wstrb :
+                           (refill_way0 && beat == 2'd1)   ? 4'hf : 4'h0;
+    wire [3:0] data0_we2 = (store_way0 && req_word == 2'd2) ? req_wstrb :
+                           (refill_way0 && beat == 2'd2)   ? 4'hf : 4'h0;
+    wire [3:0] data0_we3 = (store_way0 && req_word == 2'd3) ? req_wstrb :
+                           (refill_way0 && beat == 2'd3)   ? 4'hf : 4'h0;
+    wire [3:0] data1_we0 = (store_way1 && req_word == 2'd0) ? req_wstrb :
+                           (refill_way1 && beat == 2'd0)   ? 4'hf : 4'h0;
+    wire [3:0] data1_we1 = (store_way1 && req_word == 2'd1) ? req_wstrb :
+                           (refill_way1 && beat == 2'd1)   ? 4'hf : 4'h0;
+    wire [3:0] data1_we2 = (store_way1 && req_word == 2'd2) ? req_wstrb :
+                           (refill_way1 && beat == 2'd2)   ? 4'hf : 4'h0;
+    wire [3:0] data1_we3 = (store_way1 && req_word == 2'd3) ? req_wstrb :
+                           (refill_way1 && beat == 2'd3)   ? 4'hf : 4'h0;
+
+    mycpu_cache_data_bank_sram u_data0_bank0(
+        .addra(data_addr), .clka(clk), .dina(bank_dina), .douta(data0_word0),
+        .ena(1'b1), .wea(data0_we0)
+    );
+    mycpu_cache_data_bank_sram u_data0_bank1(
+        .addra(data_addr), .clka(clk), .dina(bank_dina), .douta(data0_word1),
+        .ena(1'b1), .wea(data0_we1)
+    );
+    mycpu_cache_data_bank_sram u_data0_bank2(
+        .addra(data_addr), .clka(clk), .dina(bank_dina), .douta(data0_word2),
+        .ena(1'b1), .wea(data0_we2)
+    );
+    mycpu_cache_data_bank_sram u_data0_bank3(
+        .addra(data_addr), .clka(clk), .dina(bank_dina), .douta(data0_word3),
+        .ena(1'b1), .wea(data0_we3)
+    );
+    mycpu_cache_data_bank_sram u_data1_bank0(
+        .addra(data_addr), .clka(clk), .dina(bank_dina), .douta(data1_word0),
+        .ena(1'b1), .wea(data1_we0)
+    );
+    mycpu_cache_data_bank_sram u_data1_bank1(
+        .addra(data_addr), .clka(clk), .dina(bank_dina), .douta(data1_word1),
+        .ena(1'b1), .wea(data1_we1)
+    );
+    mycpu_cache_data_bank_sram u_data1_bank2(
+        .addra(data_addr), .clka(clk), .dina(bank_dina), .douta(data1_word2),
+        .ena(1'b1), .wea(data1_we2)
+    );
+    mycpu_cache_data_bank_sram u_data1_bank3(
+        .addra(data_addr), .clka(clk), .dina(bank_dina), .douta(data1_word3),
+        .ena(1'b1), .wea(data1_we3)
+    );
+
+    mycpu_cache_tag_sram u_tag0(
+        .addra(tag_addr), .clka(clk), .dina(req_paddr[31:12]), .douta(tag0_dout),
+        .ena(1'b1), .wea(tag_write && !req_way)
+    );
+    mycpu_cache_tag_sram u_tag1(
+        .addra(tag_addr), .clka(clk), .dina(req_paddr[31:12]), .douta(tag1_dout),
+        .ena(1'b1), .wea(tag_write &&  req_way)
+    );
 
     assign addr_ok = (state == S_IDLE) && req;
     assign data_ok = (state == S_HIT_RESP) || (state == S_UNC_WAIT && mem_data_ok) ||
@@ -154,7 +211,6 @@ module dcache_two_way(
                                              {req_paddr[31:4], beat, 2'b00};
     assign mem_wdata = (state == S_UNC_REQ) ? req_wdata : mem_wdata_r;
 
-    integer i;
     always @(posedge clk) begin
         if (!resetn) begin
             state <= S_IDLE;
@@ -170,28 +226,18 @@ module dcache_two_way(
             req_cacop_code <= 2'b0;
             req_cacop_way <= 1'b0;
             req_way <= 1'b0;
-            req_hit <= 1'b0;
-            req_hit_way <= 1'b0;
             req_victim_valid <= 1'b0;
             req_victim_dirty <= 1'b0;
             req_victim_tag <= 20'b0;
             req_victim_line <= 128'b0;
             beat <= 2'b0;
-            refill_line <= 128'b0;
             resp_data <= 32'b0;
-            line_after_store <= 128'b0;
             mem_wdata_r <= 32'b0;
-            for (i = 0; i < 256; i = i + 1) begin
-                valid0[i] <= 1'b0;
-                valid1[i] <= 1'b0;
-                dirty0[i] <= 1'b0;
-                dirty1[i] <= 1'b0;
-                tag0[i] <= 20'b0;
-                tag1[i] <= 20'b0;
-                data0[i] <= 128'b0;
-                data1[i] <= 128'b0;
-                used[i] <= 1'b0;
-            end
+            valid0 <= 256'b0;
+            valid1 <= 256'b0;
+            dirty0 <= 256'b0;
+            dirty1 <= 256'b0;
+            used <= 256'b0;
         end else begin
             case (state)
                 S_IDLE: begin
@@ -207,118 +253,104 @@ module dcache_two_way(
                         req_is_cacop <= is_cacop;
                         req_cacop_code <= cacop_code;
                         req_cacop_way <= cacop_way;
-                        req_way <= is_cacop && cacop_code != 2'b10 ? cacop_way : (hit_now ? hit_way_now : replace_way_now);
-                        req_hit <= hit_now;
-                        req_hit_way <= hit_way_now;
-                        req_victim_valid <= victim_valid_now;
-                        req_victim_dirty <= victim_dirty_now;
-                        req_victim_tag <= victim_tag_now;
-                        req_victim_line <= victim_line_now;
                         beat <= 2'b0;
-                        refill_line <= 128'b0;
 
-                        if (is_cacop) begin
-                            if (cacop_code == 2'b10) begin
-                                if (hit0_now) begin
-                                    if (dirty0[index]) begin
-                                        req_way <= 1'b0;
-                                        req_victim_valid <= 1'b1;
-                                        req_victim_dirty <= 1'b1;
-                                        req_victim_tag <= tag0[index];
-                                        req_victim_line <= data0[index];
-                                        beat <= 2'b0;
-                                        mem_wdata_r <= data0[index][31:0];
-                                        state <= S_WB_REQ;
-                                    end else begin
-                                        valid0[index] <= 1'b0;
-                                        dirty0[index] <= 1'b0;
-                                        state <= S_CACOP_RESP;
-                                    end
-                                end else if (hit1_now) begin
-                                    if (dirty1[index]) begin
-                                        req_way <= 1'b1;
-                                        req_victim_valid <= 1'b1;
-                                        req_victim_dirty <= 1'b1;
-                                        req_victim_tag <= tag1[index];
-                                        req_victim_line <= data1[index];
-                                        beat <= 2'b0;
-                                        mem_wdata_r <= data1[index][31:0];
-                                        state <= S_WB_REQ;
-                                    end else begin
-                                        valid1[index] <= 1'b0;
-                                        dirty1[index] <= 1'b0;
-                                        state <= S_CACOP_RESP;
-                                    end
+                        if (uncached && !is_cacop) begin
+                            state <= S_UNC_REQ;
+                        end else begin
+                            state <= S_LOOKUP;
+                        end
+                    end
+                end
+                S_LOOKUP: begin
+                    if (req_is_cacop) begin
+                        if (req_cacop_code == 2'b10) begin
+                            if (hit0) begin
+                                req_way <= 1'b0;
+                                req_victim_valid <= 1'b1;
+                                req_victim_dirty <= dirty0[req_index];
+                                req_victim_tag <= tag0_dout;
+                                req_victim_line <= data0_line;
+                                beat <= 2'b0;
+                                mem_wdata_r <= data0_word0;
+                                if (dirty0[req_index]) begin
+                                    state <= S_WB_REQ;
                                 end else begin
+                                    valid0[req_index] <= 1'b0;
+                                    dirty0[req_index] <= 1'b0;
                                     state <= S_CACOP_RESP;
                                 end
-                            end else if (cacop_code == 2'b01) begin
-                                if (cacop_way == 1'b0 && valid0[index] && dirty0[index]) begin
-                                    req_way <= 1'b0;
-                                    req_victim_valid <= 1'b1;
-                                    req_victim_dirty <= 1'b1;
-                                    req_victim_tag <= tag0[index];
-                                    req_victim_line <= data0[index];
-                                    beat <= 2'b0;
-                                    mem_wdata_r <= data0[index][31:0];
-                                    state <= S_WB_REQ;
-                                end else if (cacop_way == 1'b1 && valid1[index] && dirty1[index]) begin
-                                    req_way <= 1'b1;
-                                    req_victim_valid <= 1'b1;
-                                    req_victim_dirty <= 1'b1;
-                                    req_victim_tag <= tag1[index];
-                                    req_victim_line <= data1[index];
-                                    beat <= 2'b0;
-                                    mem_wdata_r <= data1[index][31:0];
+                            end else if (hit1) begin
+                                req_way <= 1'b1;
+                                req_victim_valid <= 1'b1;
+                                req_victim_dirty <= dirty1[req_index];
+                                req_victim_tag <= tag1_dout;
+                                req_victim_line <= data1_line;
+                                beat <= 2'b0;
+                                mem_wdata_r <= data1_word0;
+                                if (dirty1[req_index]) begin
                                     state <= S_WB_REQ;
                                 end else begin
-                                    if (cacop_way == 1'b0) begin
-                                        valid0[index] <= 1'b0;
-                                        dirty0[index] <= 1'b0;
-                                    end else begin
-                                        valid1[index] <= 1'b0;
-                                        dirty1[index] <= 1'b0;
-                                    end
+                                    valid1[req_index] <= 1'b0;
+                                    dirty1[req_index] <= 1'b0;
                                     state <= S_CACOP_RESP;
                                 end
                             end else begin
-                                if (cacop_way == 1'b0) begin
-                                    valid0[index] <= 1'b0;
-                                    dirty0[index] <= 1'b0;
+                                state <= S_CACOP_RESP;
+                            end
+                        end else if (req_cacop_code == 2'b01) begin
+                            req_way <= req_cacop_way;
+                            req_victim_valid <= req_cacop_way ? valid1[req_index] : valid0[req_index];
+                            req_victim_dirty <= req_cacop_way ? dirty1[req_index] : dirty0[req_index];
+                            req_victim_tag <= req_cacop_way ? tag1_dout : tag0_dout;
+                            req_victim_line <= req_cacop_way ? data1_line : data0_line;
+                            beat <= 2'b0;
+                            mem_wdata_r <= req_cacop_way ? data1_word0 : data0_word0;
+                            if (req_cacop_way == 1'b0 && valid0[req_index] && dirty0[req_index]) begin
+                                state <= S_WB_REQ;
+                            end else if (req_cacop_way == 1'b1 && valid1[req_index] && dirty1[req_index]) begin
+                                state <= S_WB_REQ;
+                            end else begin
+                                if (req_cacop_way == 1'b0) begin
+                                    valid0[req_index] <= 1'b0;
+                                    dirty0[req_index] <= 1'b0;
                                 end else begin
-                                    valid1[index] <= 1'b0;
-                                    dirty1[index] <= 1'b0;
+                                    valid1[req_index] <= 1'b0;
+                                    dirty1[req_index] <= 1'b0;
                                 end
                                 state <= S_CACOP_RESP;
                             end
-                        end else if (uncached) begin
-                            state <= S_UNC_REQ;
-                        end else if (hit_now) begin
-                            if (op) begin
-                                if (hit_way_now == 1'b0) begin
-                                    line_after_store = merge_line_store(data0[index], paddr[3:2], wdata, wstrb);
-                                    data0[index] <= line_after_store;
-                                    dirty0[index] <= 1'b1;
-                                    resp_data <= select_word(line_after_store, paddr[3:2]);
-                                end else begin
-                                    line_after_store = merge_line_store(data1[index], paddr[3:2], wdata, wstrb);
-                                    data1[index] <= line_after_store;
-                                    dirty1[index] <= 1'b1;
-                                    resp_data <= select_word(line_after_store, paddr[3:2]);
-                                end
-                            end else begin
-                                resp_data <= select_word(hit_way_now ? data1[index] : data0[index], paddr[3:2]);
-                            end
-                            used[index] <= hit_way_now;
-                            state <= S_HIT_RESP;
                         end else begin
-                            if (victim_valid_now && victim_dirty_now) begin
-                                beat <= 2'b0;
-                                mem_wdata_r <= victim_line_now[31:0];
-                                state <= S_WB_REQ;
+                            if (req_cacop_way == 1'b0) begin
+                                valid0[req_index] <= 1'b0;
+                                dirty0[req_index] <= 1'b0;
                             end else begin
-                                state <= S_REF_REQ;
+                                valid1[req_index] <= 1'b0;
+                                dirty1[req_index] <= 1'b0;
                             end
+                            state <= S_CACOP_RESP;
+                        end
+                    end else if (hit) begin
+                        resp_data <= req_op ? hit_store_word : hit_word;
+                        if (hit_way == 1'b0) begin
+                            dirty0[req_index] <= req_op ? 1'b1 : dirty0[req_index];
+                        end else begin
+                            dirty1[req_index] <= req_op ? 1'b1 : dirty1[req_index];
+                        end
+                        used[req_index] <= hit_way;
+                        state <= S_HIT_RESP;
+                    end else begin
+                        req_way <= replace_way;
+                        req_victim_valid <= victim_valid;
+                        req_victim_dirty <= victim_dirty;
+                        req_victim_tag <= victim_tag;
+                        req_victim_line <= victim_line;
+                        beat <= 2'b0;
+                        mem_wdata_r <= select_word(victim_line, 2'd0);
+                        if (victim_valid && victim_dirty) begin
+                            state <= S_WB_REQ;
+                        end else begin
+                            state <= S_REF_REQ;
                         end
                     end
                 end
@@ -327,7 +359,7 @@ module dcache_two_way(
                 end
                 S_UNC_REQ: begin
                     if (mem_addr_ok) begin
-                        state <= req_op ? S_UNC_WAIT : S_UNC_WAIT;
+                        state <= S_UNC_WAIT;
                     end
                 end
                 S_UNC_WAIT: begin
@@ -359,12 +391,7 @@ module dcache_two_way(
                             end
                         end else begin
                             beat <= beat + 2'd1;
-                            case (beat + 2'd1)
-                                2'd0: mem_wdata_r <= req_victim_line[31:0];
-                                2'd1: mem_wdata_r <= req_victim_line[63:32];
-                                2'd2: mem_wdata_r <= req_victim_line[95:64];
-                                default: mem_wdata_r <= req_victim_line[127:96];
-                            endcase
+                            mem_wdata_r <= select_word(req_victim_line, beat + 2'd1);
                             state <= S_WB_REQ;
                         end
                     end
@@ -376,19 +403,14 @@ module dcache_two_way(
                 end
                 S_REF_WAIT: begin
                     if (mem_data_ok) begin
-                        refill_line <= put_word(refill_line, beat, mem_rdata);
+                        if (beat == req_word) begin
+                            resp_data <= refill_write_word;
+                        end
                         if (beat == 2'd3) begin
-                            line_after_store = req_op ? merge_line_store(put_word(refill_line, beat, mem_rdata), req_word, req_wdata, req_wstrb)
-                                                      : put_word(refill_line, beat, mem_rdata);
-                            resp_data <= select_word(line_after_store, req_word);
                             if (req_way == 1'b0) begin
-                                data0[req_index] <= line_after_store;
-                                tag0[req_index] <= req_paddr[31:12];
                                 valid0[req_index] <= 1'b1;
                                 dirty0[req_index] <= req_op;
                             end else begin
-                                data1[req_index] <= line_after_store;
-                                tag1[req_index] <= req_paddr[31:12];
                                 valid1[req_index] <= 1'b1;
                                 dirty1[req_index] <= req_op;
                             end

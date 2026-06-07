@@ -1597,24 +1597,6 @@ module core_top(
         .trap_ertn(trap_ertn)
     );
 
-    // Wb_stage 现在只作为信号传递模块，异常检测由 trap_unit 完成
-    // 如果需要，可以后续完全移除 Wb_stage
-    // Wb_stage wb_stage(
-    //     .wb_is_syscall(wb_is_syscall),
-    //     .wb_ecode(wb_ecode),
-    //     .wb_esubcode(wb_esubcode),
-    //     .wb_ex(wb_ex),
-    //     .wb_is_ertn(wb_is_ertn),
-    //     .wb_ex_adef(wb_ex_adef),
-    //     .wb_ex_ale(wb_ex_ale),
-    //     .wb_ex_brk(wb_ex_brk),
-    //     .wb_ex_ine(wb_ex_ine),
-    //     .wb_need_cancel(wb_need_cancel),
-    //     .wb_has_int(wb_has_int),
-    //     .wb_inst_tlb_ex(wb_inst_tlb_ex),
-    //     .wb_data_tlb_ex(wb_data_tlb_ex)
-    // );
-
     wire [13:0]csr_num;
 
     wire [7:0]hw_int_in;

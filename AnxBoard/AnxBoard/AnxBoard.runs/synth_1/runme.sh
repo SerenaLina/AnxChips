@@ -3,7 +3,8 @@
 # 
 # Vivado(TM)
 # runme.sh: a Vivado-generated Runs Script for UNIX
-# Copyright 1986-2019 Xilinx, Inc. All Rights Reserved.
+# Copyright 1986-2022 Xilinx, Inc. All Rights Reserved.
+# Copyright 2022-2023 Advanced Micro Devices, Inc. All Rights Reserved.
 # 
 
 echo "This script was generated under a different operating system."
@@ -11,9 +12,9 @@ echo "Please update the PATH and LD_LIBRARY_PATH variables below, before executi
 exit
 
 if [ -z "$PATH" ]; then
-  PATH=D:/Vivado/Vivado/2019.2/ids_lite/ISE/bin/nt64;D:/Vivado/Vivado/2019.2/ids_lite/ISE/lib/nt64:D:/Vivado/Vivado/2019.2/bin
+  PATH=D:/Vivado2023/Vivado/2023.2/ids_lite/ISE/bin/nt64;D:/Vivado2023/Vivado/2023.2/ids_lite/ISE/lib/nt64:D:/Vivado2023/Vivado/2023.2/bin
 else
-  PATH=D:/Vivado/Vivado/2019.2/ids_lite/ISE/bin/nt64;D:/Vivado/Vivado/2019.2/ids_lite/ISE/lib/nt64:D:/Vivado/Vivado/2019.2/bin:$PATH
+  PATH=D:/Vivado2023/Vivado/2023.2/ids_lite/ISE/bin/nt64;D:/Vivado2023/Vivado/2023.2/ids_lite/ISE/lib/nt64:D:/Vivado2023/Vivado/2023.2/bin:$PATH
 fi
 export PATH
 
@@ -40,4 +41,4 @@ EAStep()
      fi
 }
 
-EAStep vivado -log fpga_top.vds -m64 -product Vivado -mode batch -messageDb vivado.pb -notrace -source fpga_top.tcl
+EAStep vivado -log soc_top.vds -m64 -product Vivado -mode batch -messageDb vivado.pb -notrace -source soc_top.tcl
