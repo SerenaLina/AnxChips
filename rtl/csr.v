@@ -134,6 +134,7 @@ module CSRREG (
     input wire [3:0]csr_tlbidx_index_wvalue,
     input wire csr_tlbidx_index_we,
     output wire [3:0] csr_tlbidx_index,
+    output wire csr_tlbidx_index_invalid,
     input wire csr_tlbidx_ne_we,
     input wire csr_tlbidx_ne_wvalue,
     input wire csr_tlbidx_ps_we,
@@ -189,6 +190,8 @@ module CSRREG (
     output reg [2:0] csr_dmw1_vseg,
     output reg csr_crmd_pg,
     output reg csr_crmd_da,
+    output reg [1:0] csr_crmd_datf,
+    output reg [1:0] csr_crmd_datm,
     output reg [1:0]csr_crmd_plv,
     input wire csr_inst_tlb_refill,
     input wire csr_data_tlb_refill,
@@ -204,9 +207,6 @@ module CSRREG (
     reg [1:0]csr_prmd_pplv;
 
     reg csr_prmd_pie;
-
-    reg [1:0]csr_crmd_datf;
-    reg [1:0]csr_crmd_datm;
 
 
     reg [8:0]csr_estat_esubcode;
@@ -522,6 +522,7 @@ module CSRREG (
     assign csr_tlbidx_ne    = csr_tlbidx_full[31];
     assign csr_tlbidx_ps    = csr_tlbidx_full[29:24];
     assign csr_tlbidx_index = csr_tlbidx_full[3:0];
+    assign csr_tlbidx_index_invalid = |csr_tlbidx_full[15:4];
 
     always @(posedge clk)
     begin

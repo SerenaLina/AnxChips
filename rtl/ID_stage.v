@@ -164,6 +164,7 @@ module ID_stage(
     wire        inst_tlbfill;  // TLB填充指令
     wire        inst_invtlb;   // TLB无效化指�?
     wire        inst_cpucfg;   // CPUCFG指令
+    wire        inst_cacop;    // Cache操作指令
 
 
     // 指令字段提取
@@ -271,6 +272,7 @@ module ID_stage(
     assign inst_tlbwr   = op_31_26_d[6'h01] & op_25_22_d[4'h9] & op_21_20_d[2'h0] & op_19_15_d[5'h10] & op_14_10_d[5'h0c] & op_9_5_d[5'h00] & op_4_0_d[5'h00]; // tlbwr
     assign inst_tlbfill = op_31_26_d[6'h01] & op_25_22_d[4'h9] & op_21_20_d[2'h0] & op_19_15_d[5'h10] & op_14_10_d[5'h0d] & op_9_5_d[5'h00] & op_4_0_d[5'h00]; // tlbfill
     assign inst_invtlb  = op_31_26_d[6'h01] & op_25_22_d[4'h9] & op_21_20_d[2'h0] & op_19_15_d[5'h13]; // invtlb
+    assign inst_cacop   = op_31_26_d[6'h01] & op_25_22_d[4'h8]; // cacop
 
     
 
@@ -304,8 +306,9 @@ assign id_alu_op =
 
     // 立即数类型判�?
     assign id_src2_is_imm5   = inst_slli_w | inst_srli_w | inst_srai_w ;
-    assign id_src2_is_imm12  = inst_addi_w | inst_ld_w | inst_st_w | inst_ld_b | inst_ld_h | inst_ld_bu | inst_ld_hu | 
-                         inst_st_b | inst_st_h | inst_slti | inst_sltui | inst_andi | inst_ori | inst_xori;
+    assign id_src2_is_imm12  = inst_addi_w | inst_ld_w | inst_st_w | inst_ld_b | inst_ld_h | inst_ld_bu | inst_ld_hu |
+                         inst_st_b | inst_st_h | inst_slti | inst_sltui | inst_andi | inst_ori | inst_xori |
+                         inst_cacop;
     assign id_src2_is_imm16  = inst_jirl | inst_beq | inst_bne | inst_blt | inst_bge | inst_bltu | inst_bgeu;
     assign id_src2_is_imm20  = inst_lu12i_w | inst_pcaddu12i;
     assign id_src2_is_imm26  = inst_b | inst_bl;
@@ -392,7 +395,8 @@ assign id_alu_op =
                         inst_st_b | inst_st_h |
                         inst_csrxchg |
                         inst_cpucfg |
-                        inst_invtlb;  // �?要读取rj寄存�?
+                        inst_invtlb |
+                        inst_cacop;  // �?要读取rj寄存�?
 
     assign id_src2_from_ref = inst_add_w | inst_sub_w | inst_lu12i_w | inst_slt | inst_sltu |
                         inst_or | inst_nor | inst_and | inst_xor | inst_beq | inst_bne | 
@@ -431,34 +435,35 @@ assign id_alu_op =
     assign id_ex_ine = ~(
     // 基本算术逻辑指令
     inst_add_w | inst_sub_w | inst_slt | inst_sltu |
-    inst_nor | inst_and | inst_or | inst_xor |    
+    inst_nor | inst_and | inst_or | inst_xor |
     // 移位指令
     inst_slli_w | inst_srli_w | inst_srai_w |
-    inst_sll | inst_srl | inst_sra |    
+    inst_sll | inst_srl | inst_sra |
     // 立即数指�?
     inst_addi_w | inst_slti | inst_sltui |
-    inst_andi | inst_ori | inst_xori |    
+    inst_andi | inst_ori | inst_xori |
     // 乘除指令
     inst_mul_w | inst_mulh_w | inst_mulh_wu |
-    inst_div_w | inst_mod_w | inst_div_wu | inst_mod_wu |    
+    inst_div_w | inst_mod_w | inst_div_wu | inst_mod_wu |
     // 转移指令
     inst_jirl | inst_b | inst_bl |
-    inst_beq | inst_bne | inst_blt | inst_bge | inst_bltu | inst_bgeu |    
+    inst_beq | inst_bne | inst_blt | inst_bge | inst_bltu | inst_bgeu |
     // 访存指令
     inst_ld_w | inst_ld_b | inst_ld_h | inst_ld_bu | inst_ld_hu |
-    inst_st_w | inst_st_b | inst_st_h |    
+    inst_st_w | inst_st_b | inst_st_h |
     // 特殊指令
-    inst_lu12i_w | inst_pcaddu12i |    
+    inst_lu12i_w | inst_pcaddu12i |
     // CSR指令
-    inst_csrrd | inst_csrwr | inst_csrxchg | inst_ertn |    
+    inst_csrrd | inst_csrwr | inst_csrxchg | inst_ertn |
     // 计数器指�?
     inst_rdcntvl_w | inst_rdcntvh_w | inst_rdcntid |
     // CPUCFG指�?
     inst_cpucfg |
     // 系统指令
     inst_syscall | inst_break|
-    // TLB指令
-    inst_tlbsrch | inst_tlbrd | inst_tlbwr | inst_tlbfill | (inst_invtlb && id_invtlb_op <5'h7)
+    // TLB/cache指令
+    inst_tlbsrch | inst_tlbrd | inst_tlbwr | inst_tlbfill | (inst_invtlb && id_invtlb_op <5'h7) |
+    inst_cacop
     )&&(id_pc!=32'h1bfffffc) ; // 1bfffffc为非法指令地�?
     assign id_has_int = int_has_int; // 直接传递来自interrupt.v的中断标记
     assign id_need_data_sram = inst_st_b | inst_st_h | inst_ld_b | inst_ld_bu | inst_ld_h | inst_ld_hu | inst_ld_w | inst_st_w; 

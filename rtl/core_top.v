@@ -116,7 +116,15 @@ module core_top(
     // pipeline_is_stalled_from_tlb_csr prevents deadlock when tlb_csr_we flag
     // persists in drained pipeline registers after the CSR/TLB instruction has retired
     wire pipeline_drained_except_if = (id_pc == 32'b0) && (exe1_pc == 32'b0) && (mem_pc == 32'b0);
-    assign inst_sram_req= if_allow_in & inst_req_valid & pc_inst_en & (~pipline_is_not_stalled===1'b0) & (!(inst_tlb_or_csr_we === 1'b1) | pipeline_drained_except_if);
+    wire cache_op_in_pipeline;
+    assign cache_op_in_pipeline = (if_inst[31:22] == 10'b0000011000) ||
+                                   (id_inst[31:22] == 10'b0000011000) ||
+                                   (exe1_inst[31:22] == 10'b0000011000) ||
+                                   (exe2_inst[31:22] == 10'b0000011000) ||
+                                   (mem_inst[31:22] == 10'b0000011000) ||
+                                   (wb_inst[31:22] == 10'b0000011000);
+
+    assign inst_sram_req= if_allow_in & inst_req_valid & pc_inst_en & (~pipline_is_not_stalled===1'b0) & (!(inst_tlb_or_csr_we === 1'b1) | pipeline_drained_except_if) & (!cache_op_in_pipeline | pipeline_drained_except_if);
 
     wire if_allow_in;
     wire id_allow_in;
@@ -157,6 +165,8 @@ module core_top(
     wire [31:0] rf_rdata1;
     wire [31:0] rf_rdata2;
     wire [31:0] inst_addr;   // 经过TLB转换后的地址
+    wire [1:0]  inst_mat;
+    wire        inst_uncached;
     wire inst_dmw0_en;
     wire inst_dmw1_en;
     wire [1:0]inst_tlb_ex;
@@ -174,6 +184,10 @@ module core_top(
     assign inst_addr = (csr_crmd_da && csr_crmd_pg==1'b0) ?  inst_sram_addr :
                         inst_dmw0_en                       ?  {csr_dmw0_pseg,inst_sram_addr[28:0]} :
                         inst_dmw1_en                       ?  {csr_dmw1_pseg,inst_sram_addr[28:0]} :  {tlb_s0_ppn[19:0],inst_sram_addr[11:0]};
+    assign inst_mat  = (csr_crmd_da && csr_crmd_pg==1'b0) ?  csr_crmd_datf :
+                        inst_dmw0_en                       ?  csr_dmw0_mat :
+                        inst_dmw1_en                       ?  csr_dmw1_mat : tlb_s0_mat;
+    assign inst_uncached = ~inst_mat[0];
 
 
     // === BTB: simple branch target buffer ===
@@ -1189,6 +1203,29 @@ module core_top(
     wire data_tlb_or_csr_we;
 
     assign mem_dram_rdata=data_sram_rdata;
+
+    wire        exe2_is_cacop;
+    wire [4:0]  exe2_cacop_op;
+    wire [1:0]  exe2_cacop_code;
+    wire        exe2_cacop_is_i;
+    wire        exe2_cacop_is_d;
+    wire        exe2_cacop_op2;
+    wire        mem_is_cacop;
+    wire [4:0]  mem_cacop_op;
+    wire        mem_cacop_is_i;
+    wire        mem_cacop_is_d;
+
+    assign exe2_is_cacop    = (exe2_inst[31:22] == 10'b0000011000);
+    assign exe2_cacop_op    = exe2_inst[4:0];
+    assign exe2_cacop_code  = exe2_inst[4:3];
+    assign exe2_cacop_is_i  = exe2_is_cacop && (exe2_cacop_op[0] == 1'b0);
+    assign exe2_cacop_is_d  = exe2_is_cacop && (exe2_cacop_op[0] == 1'b1);
+    assign exe2_cacop_op2   = exe2_is_cacop && (exe2_cacop_code == 2'b10);
+    assign mem_is_cacop     = (mem_inst[31:22] == 10'b0000011000);
+    assign mem_cacop_op     = mem_inst[4:0];
+    assign mem_cacop_is_i   = mem_is_cacop && (mem_cacop_op[0] == 1'b0);
+    assign mem_cacop_is_d   = mem_is_cacop && (mem_cacop_op[0] == 1'b1);
+
     assign data_sram_wstrb=(wb_ex===1'b1||exe2_ex_ale===1'b1||wb_is_ertn===1'b1 || data_tlb_ex != 3'b0)?    4'b0000:
                         (exe2_dram_we&&exe2_wdram_num==0)? 4'b1111:
                         (exe2_dram_we&&exe2_wdram_num==1&&data_sram_addr[1:0]==2'b00)?  4'b0001:
@@ -1199,11 +1236,15 @@ module core_top(
                         (exe2_dram_we&&exe2_wdram_num==2&&data_sram_addr[1:0]==2'b01)?4'b0110:
                         (exe2_dram_we&&exe2_wdram_num==2&&data_sram_addr[1:0]==2'b10)?4'b1100:   4'b0000;
 
-    assign data_sram_req=  data_req_valid & exe2_need_data_sram & mem_allow_in &&(wb_ex!=1'b1) & (!(data_tlb_or_csr_we === 1'b1)) &(data_tlb_ex == 3'b0);
+    wire normal_data_sram_req;
+    wire cacheop_req;
+    assign normal_data_sram_req = data_req_valid & exe2_need_data_sram & mem_allow_in &&(wb_ex!=1'b1) & (!(data_tlb_or_csr_we === 1'b1)) &(data_tlb_ex == 3'b0);
+    assign cacheop_req = data_req_valid & exe2_is_cacop & mem_allow_in &&(wb_ex!=1'b1) & (!(data_tlb_or_csr_we === 1'b1)) &(data_tlb_ex == 3'b0);
+    assign data_sram_req= normal_data_sram_req | cacheop_req;
     assign data_sram_size = exe2_ex_ale_h ? 2'b1 :
                             exe2_ex_ale_w ? 2'b10 :  2'b0;
-    assign exe2_addr_shake_ok = exe2_need_data_sram ?  data_sram_req&&(data_sram_addr_ok===1'b1) :  1'b1;
-    assign mem_data_shake_ok = mem_need_data_sram ?  (data_sram_data_ok===1'b1) : 1'b1;
+    assign exe2_addr_shake_ok = (exe2_need_data_sram || exe2_is_cacop) ?  (data_sram_req&&(data_sram_addr_ok===1'b1) || (data_tlb_ex!=3'b0)) :  1'b1;
+    assign mem_data_shake_ok = (mem_need_data_sram || mem_is_cacop) ?  (data_sram_data_ok===1'b1) : 1'b1;
     assign data_sram_wr = exe2_dram_we;
     assign mem_need_and_data_ok = mem_need_data_sram && (data_sram_data_ok===1'b1);
    // assign data_sram_en=1'b1;
@@ -1213,13 +1254,15 @@ module core_top(
     assign data_sram_addr=exe2_alu_result;
 
     wire [31:0] data_addr;   // 经过TLB转换后的地址
+    wire [1:0]  data_mat;
+    wire        data_uncached;
     wire data_dmw0_en;
     wire data_dmw1_en;
     wire [2:0]data_tlb_ex;
 
-    assign data_tlb_ex = ((csr_crmd_da && csr_crmd_pg==1'b0)|| data_dmw0_en || data_dmw1_en || exe2_need_data_sram==1'b0) ? 3'h0 :
+    assign data_tlb_ex = ((csr_crmd_da && csr_crmd_pg==1'b0)|| data_dmw0_en || data_dmw1_en || (exe2_need_data_sram==1'b0 && exe2_cacop_op2==1'b0)) ? 3'h0 :
                          (tlb_s1_found == 1'b0)                                              ? 3'h1 :
-                         (tlb_s1_v == 1'b0 && exe2_is_ld)                                     ? 3'h2 :
+                         (tlb_s1_v == 1'b0 && (exe2_is_ld || exe2_cacop_op2))              ? 3'h2 :
                          (tlb_s1_v == 1'b0 && exe2_is_st)                                     ? 3'h3 :
                          (tlb_s1_plv < csr_crmd_plv)                                         ? 3'h4 :
                          (tlb_s1_d == 1'b0 && exe2_is_st)                                     ? 3'h5 : 3'h0;
@@ -1231,6 +1274,10 @@ module core_top(
     assign data_addr = (csr_crmd_da && csr_crmd_pg==1'b0) ?  data_sram_addr :
                         data_dmw0_en                       ?  {csr_dmw0_pseg,data_sram_addr[28:0]} :
                         data_dmw1_en                       ?  {csr_dmw1_pseg,data_sram_addr[28:0]} :  {tlb_s1_ppn[19:0],data_sram_addr[11:0]};
+    assign data_mat  = (csr_crmd_da && csr_crmd_pg==1'b0) ?  csr_crmd_datm :
+                        data_dmw0_en                       ?  csr_dmw0_mat :
+                        data_dmw1_en                       ?  csr_dmw1_mat : tlb_s1_mat;
+    assign data_uncached = ~data_mat[0];
 
     assign data_tlb_or_csr_we = mem_tlb_or_csr_we | wb_tlb_or_csr_we;
 
@@ -1444,7 +1491,7 @@ module core_top(
     assign id_src1=rf_rdata1;
     assign id_src2=rf_rdata2;
     assign debug0_wb_pc = wb_pc;
-    assign debug0_wb_rf_wen ={4{rf_we}};
+    assign debug0_wb_rf_wen ={4{rf_we}} ;
     assign debug0_wb_rf_wnum=wb_rd;
     assign debug0_wb_rf_wdata=rf_wdata;
 
@@ -1455,9 +1502,9 @@ module core_top(
                             1'b1;
     assign exe2_ready_go=   (wb_ex===1'b1)?                                            1'b0:
                             (EXE2_ready_go == 1'b1) ?                                  1'b1 :
-                            exe2_need_data_sram ? (data_sram_addr_ok===1'b1 && data_sram_req)||(data_tlb_ex!=3'b0) : 1'b1;
+                            (exe2_need_data_sram || exe2_is_cacop) ? ((data_sram_addr_ok===1'b1 && data_sram_req)||(data_tlb_ex!=3'b0)) : 1'b1;
     assign mem_ready_go=     (wb_ex===1'b1)?                                                 1'b0:
-                            mem_need_data_sram ?  (data_sram_data_ok===1'b1||mem_data_tlb_ex != 3'b0) : 1'b1;
+                            (mem_need_data_sram || mem_is_cacop) ?  (data_sram_data_ok===1'b1||mem_data_tlb_ex != 3'b0) : 1'b1;
     assign pre_if_ready_go =(inst_sram_addr_ok && inst_sram_req)||(inst_tlb_ex != 2'b0);
     //assign if_ready_go =1'b1;
     //assign id_ready_go =1'b1;
@@ -1582,6 +1629,7 @@ module core_top(
     wire [31:0] wb_ex_ale_addr;
     wire csr_ex;
     wire [3:0] csr_tlbidx_index;
+    wire csr_tlbidx_index_invalid;
     wire csr_tlbidx_index_we;
     wire [3:0]csr_tlbidx_index_wvalue;
     wire csr_tlbehi_we;
@@ -1650,6 +1698,8 @@ module core_top(
     wire [2:0] csr_dmw1_vseg;
     wire csr_crmd_da;
     wire csr_crmd_pg;
+    wire [1:0] csr_crmd_datf;
+    wire [1:0] csr_crmd_datm;
     wire [31:0] csr_dmw0;
     wire [31:0] csr_dmw1;
     wire [1:0] csr_crmd_plv;
@@ -1717,6 +1767,7 @@ module core_top(
 
 
         .csr_tlbidx_index(csr_tlbidx_index),                           //   output
+        .csr_tlbidx_index_invalid(csr_tlbidx_index_invalid),             //   output
         .csr_tlbidx_index_we(csr_tlbidx_index_we),                     //   input
         .csr_tlbidx_index_wvalue(csr_tlbidx_index_wvalue),             //   input
 
@@ -1783,6 +1834,8 @@ module core_top(
         .csr_dmw1_vseg(csr_dmw1_vseg),
         .csr_crmd_da(csr_crmd_da),
         .csr_crmd_pg(csr_crmd_pg),
+        .csr_crmd_datf(csr_crmd_datf),
+        .csr_crmd_datm(csr_crmd_datm),
         .csr_crmd_plv(csr_crmd_plv),
         .csr_inst_tlb_refill(csr_inst_tlb_refill),
         .csr_data_tlb_refill(csr_data_tlb_refill),
@@ -1869,29 +1922,128 @@ module core_top(
         .ID_ready_go(ID_ready_go)
     );
 
+    wire        icache_mem_req;
+    wire        icache_mem_wr;
+    wire [1:0]  icache_mem_size;
+    wire [3:0]  icache_mem_wstrb;
+    wire [31:0] icache_mem_addr;
+    wire [31:0] icache_mem_wdata;
+    wire        icache_mem_addr_ok;
+    wire        icache_mem_data_ok;
+    wire [31:0] icache_mem_rdata;
+
+    wire        dcache_mem_req;
+    wire        dcache_mem_wr;
+    wire [1:0]  dcache_mem_size;
+    wire [3:0]  dcache_mem_wstrb;
+    wire [31:0] dcache_mem_addr;
+    wire [31:0] dcache_mem_wdata;
+    wire        dcache_mem_addr_ok;
+    wire        dcache_mem_data_ok;
+    wire [31:0] dcache_mem_rdata;
+
+    wire        icache_fetch_addr_ok;
+    wire        icache_fetch_data_ok;
+    wire [31:0] icache_fetch_rdata;
+    wire        icache_cacop_req;
+    wire        icache_cacop_addr_ok;
+    wire        icache_cacop_data_ok;
+    wire        dcache_req;
+    wire        dcache_addr_ok;
+    wire        dcache_data_ok;
+    wire [31:0] dcache_rdata;
+
+    assign icache_cacop_req = cacheop_req && exe2_cacop_is_i;
+    assign dcache_req       = normal_data_sram_req || (cacheop_req && exe2_cacop_is_d);
+
+    assign inst_sram_addr_ok = icache_fetch_addr_ok;
+    assign inst_sram_data_ok = icache_fetch_data_ok;
+    assign inst_sram_rdata   = icache_fetch_rdata;
+
+    assign data_sram_addr_ok = dcache_req       ? dcache_addr_ok :
+                               icache_cacop_req ? icache_cacop_addr_ok : 1'b0;
+    assign data_sram_data_ok = dcache_data_ok | icache_cacop_data_ok;
+    assign data_sram_rdata   = dcache_rdata;
+
+    icache_two_way u_icache (
+        .clk(clk),
+        .resetn(aresetn),
+        .fetch_req(inst_sram_req),
+        .fetch_index(inst_sram_addr[11:4]),
+        .fetch_paddr(inst_addr),
+        .fetch_uncached(inst_uncached),
+        .fetch_addr_ok(icache_fetch_addr_ok),
+        .fetch_data_ok(icache_fetch_data_ok),
+        .fetch_rdata(icache_fetch_rdata),
+        .cacop_req(icache_cacop_req),
+        .cacop_code(exe2_cacop_code),
+        .cacop_index(data_sram_addr[11:4]),
+        .cacop_paddr(data_addr),
+        .cacop_way(data_sram_addr[0]),
+        .cacop_addr_ok(icache_cacop_addr_ok),
+        .cacop_data_ok(icache_cacop_data_ok),
+        .mem_req(icache_mem_req),
+        .mem_wr(icache_mem_wr),
+        .mem_size(icache_mem_size),
+        .mem_wstrb(icache_mem_wstrb),
+        .mem_addr(icache_mem_addr),
+        .mem_wdata(icache_mem_wdata),
+        .mem_addr_ok(icache_mem_addr_ok),
+        .mem_data_ok(icache_mem_data_ok),
+        .mem_rdata(icache_mem_rdata)
+    );
+
+    dcache_two_way u_dcache (
+        .clk(clk),
+        .resetn(aresetn),
+        .req(dcache_req),
+        .op(data_sram_wr),
+        .size(data_sram_size),
+        .index(data_sram_addr[11:4]),
+        .paddr(data_addr),
+        .wstrb(data_sram_wstrb),
+        .wdata(data_sram_wdata),
+        .uncached(data_uncached),
+        .is_cacop(cacheop_req && exe2_cacop_is_d),
+        .cacop_code(exe2_cacop_code),
+        .cacop_way(data_sram_addr[0]),
+        .addr_ok(dcache_addr_ok),
+        .data_ok(dcache_data_ok),
+        .rdata(dcache_rdata),
+        .mem_req(dcache_mem_req),
+        .mem_wr(dcache_mem_wr),
+        .mem_size(dcache_mem_size),
+        .mem_wstrb(dcache_mem_wstrb),
+        .mem_addr(dcache_mem_addr),
+        .mem_wdata(dcache_mem_wdata),
+        .mem_addr_ok(dcache_mem_addr_ok),
+        .mem_data_ok(dcache_mem_data_ok),
+        .mem_rdata(dcache_mem_rdata)
+    );
+
     axi_bridge u_axi_bridge (
     .aclk(aclk),
     .aresetn(aresetn),
 
-    .inst_sram_req(inst_sram_req),
-    .inst_sram_wr(inst_sram_wr),
-    .inst_sram_size(inst_sram_size),
-    .inst_sram_wstrb(inst_sram_wstrb),
-    .inst_sram_addr(inst_addr),
-    .inst_sram_wdata(inst_sram_wdata),
-    .inst_sram_data_ok(inst_sram_data_ok),
-    .inst_sram_addr_ok(inst_sram_addr_ok),
-    .inst_sram_rdata(inst_sram_rdata),
+    .inst_sram_req(icache_mem_req),
+    .inst_sram_wr(icache_mem_wr),
+    .inst_sram_size(icache_mem_size),
+    .inst_sram_wstrb(icache_mem_wstrb),
+    .inst_sram_addr(icache_mem_addr),
+    .inst_sram_wdata(icache_mem_wdata),
+    .inst_sram_data_ok(icache_mem_data_ok),
+    .inst_sram_addr_ok(icache_mem_addr_ok),
+    .inst_sram_rdata(icache_mem_rdata),
 
-    .data_sram_req(data_sram_req),
-    .data_sram_wr(data_sram_wr),
-    .data_sram_size(data_sram_size),
-    .data_sram_wstrb(data_sram_wstrb),
-    .data_sram_addr(data_addr),
-    .data_sram_wdata(data_sram_wdata),
-    .data_sram_data_ok(data_sram_data_ok),
-    .data_sram_addr_ok(data_sram_addr_ok),
-    .data_sram_rdata(data_sram_rdata),
+    .data_sram_req(dcache_mem_req),
+    .data_sram_wr(dcache_mem_wr),
+    .data_sram_size(dcache_mem_size),
+    .data_sram_wstrb(dcache_mem_wstrb),
+    .data_sram_addr(dcache_mem_addr),
+    .data_sram_wdata(dcache_mem_wdata),
+    .data_sram_data_ok(dcache_mem_data_ok),
+    .data_sram_addr_ok(dcache_mem_addr_ok),
+    .data_sram_rdata(dcache_mem_rdata),
 
     .arid(arid),
     .araddr(araddr),
@@ -2114,69 +2266,71 @@ module core_top(
     .invtlb_op(wb_invtlb_op)                 //Invtlb指令的操作码
 );
 
+    wire tlbrd_entry_valid = wb_inst_tlbrd && !csr_tlbidx_index_invalid && tlb_r_e;
+
     assign csr_tlbehi_we = wb_inst_tlbrd ? 1'b1 : 1'b0;
-    assign csr_tlbehi_wvalue = (wb_inst_tlbrd && tlb_r_e ) ?  tlb_r_vppn : 19'b0;
+    assign csr_tlbehi_wvalue = tlbrd_entry_valid ?  tlb_r_vppn : 19'b0;
 
     assign csr_tlbelo0_g_we = wb_inst_tlbrd ? 1'b1 : 1'b0;
-    assign csr_tlbelo0_g_wvalue   =  (wb_inst_tlbrd && tlb_r_e ) ?  tlb_r_g : 1'b0;
+    assign csr_tlbelo0_g_wvalue   =  tlbrd_entry_valid ?  tlb_r_g : 1'b0;
 
 
     assign csr_tlbelo0_d_we = wb_inst_tlbrd ? 1'b1 : 1'b0;
-    assign csr_tlbelo0_d_wvalue = (wb_inst_tlbrd && tlb_r_e ) ?  tlb_r_d0 : 1'b0;
+    assign csr_tlbelo0_d_wvalue = tlbrd_entry_valid ?  tlb_r_d0 : 1'b0;
 
 
     assign csr_tlbelo0_v_we = wb_inst_tlbrd ? 1'b1 : 1'b0;
-    assign csr_tlbelo0_v_wvalue = (wb_inst_tlbrd && tlb_r_e ) ?  tlb_r_v0 : 1'b0;
+    assign csr_tlbelo0_v_wvalue = tlbrd_entry_valid ?  tlb_r_v0 : 1'b0;
 
 
     assign csr_tlbelo0_plv_we = wb_inst_tlbrd ? 1'b1 : 1'b0;
-    assign csr_tlbelo0_plv_wvalue = (wb_inst_tlbrd && tlb_r_e ) ?  tlb_r_plv0 : 2'b0;
+    assign csr_tlbelo0_plv_wvalue = tlbrd_entry_valid ?  tlb_r_plv0 : 2'b0;
 
 
     assign csr_tlbelo0_mat_we = wb_inst_tlbrd ? 1'b1 : 1'b0;
-    assign csr_tlbelo0_mat_wvalue =  (wb_inst_tlbrd && tlb_r_e ) ?  tlb_r_mat0 : 2'b0;
+    assign csr_tlbelo0_mat_wvalue =  tlbrd_entry_valid ?  tlb_r_mat0 : 2'b0;
 
 
     assign csr_tlbelo0_ppn_we = wb_inst_tlbrd ? 1'b1 : 1'b0;
-    assign csr_tlbelo0_ppn_wvalue = (wb_inst_tlbrd && tlb_r_e ) ?  tlb_r_ppn0 : 20'b0;
+    assign csr_tlbelo0_ppn_wvalue = tlbrd_entry_valid ?  tlb_r_ppn0 : 20'b0;
 
 
     assign csr_tlbelo1_g_we = wb_inst_tlbrd ? 1'b1 : 1'b0;
-    assign csr_tlbelo1_g_wvalue   =  (wb_inst_tlbrd && tlb_r_e ) ?  tlb_r_g : 1'b0;
+    assign csr_tlbelo1_g_wvalue   =  tlbrd_entry_valid ?  tlb_r_g : 1'b0;
 
 
     assign csr_tlbelo1_d_we = wb_inst_tlbrd ? 1'b1 : 1'b0;
-    assign csr_tlbelo1_d_wvalue = (wb_inst_tlbrd && tlb_r_e ) ?  tlb_r_d1 : 1'b0;
+    assign csr_tlbelo1_d_wvalue = tlbrd_entry_valid ?  tlb_r_d1 : 1'b0;
 
 
     assign csr_tlbelo1_v_we = wb_inst_tlbrd ? 1'b1 : 1'b0;
-    assign csr_tlbelo1_v_wvalue = (wb_inst_tlbrd && tlb_r_e ) ?  tlb_r_v1 : 1'b0;
+    assign csr_tlbelo1_v_wvalue = tlbrd_entry_valid ?  tlb_r_v1 : 1'b0;
 
 
     assign csr_tlbelo1_plv_we = wb_inst_tlbrd ? 1'b1 : 1'b0;
-    assign csr_tlbelo1_plv_wvalue = (wb_inst_tlbrd && tlb_r_e ) ?  tlb_r_plv1 : 2'b0;
+    assign csr_tlbelo1_plv_wvalue = tlbrd_entry_valid ?  tlb_r_plv1 : 2'b0;
 
 
     assign csr_tlbelo1_mat_we = wb_inst_tlbrd ? 1'b1 : 1'b0;
-    assign csr_tlbelo1_mat_wvalue =  (wb_inst_tlbrd && tlb_r_e ) ?  tlb_r_mat1: 2'b0;
+    assign csr_tlbelo1_mat_wvalue =  tlbrd_entry_valid ?  tlb_r_mat1: 2'b0;
 
 
     assign csr_tlbelo1_ppn_we = wb_inst_tlbrd ? 1'b1 : 1'b0;
-    assign csr_tlbelo1_ppn_wvalue = (wb_inst_tlbrd && tlb_r_e ) ?  tlb_r_ppn1 : 20'b0;
+    assign csr_tlbelo1_ppn_wvalue = tlbrd_entry_valid ?  tlb_r_ppn1 : 20'b0;
 
 
     assign csr_tlbidx_ps_we =  wb_inst_tlbrd ? 1'b1 : 1'b0;
-    assign csr_tlbidx_ps_wvalue = (wb_inst_tlbrd && tlb_r_e ) ?  tlb_r_ps : 6'b0;
+    assign csr_tlbidx_ps_wvalue = tlbrd_entry_valid ?  tlb_r_ps : 6'b0;
 
 
     assign csr_tlbidx_ne_we =  (wb_inst_tlbrd || wb_inst_tlbsrch) ? 1'b1 : 1'b0;
-    assign csr_tlbidx_ne_wvalue = (wb_inst_tlbrd && tlb_r_e ) ?  1'b0 :
+    assign csr_tlbidx_ne_wvalue = tlbrd_entry_valid ?  1'b0 :
                                   (wb_inst_tlbrd && tlb_r_e!=1'b1 )?   1'b1 :
                                   (wb_inst_tlbsrch && tlb_s2_found) ?  1'b0: 1'b1;
 
 
     assign csr_asid_asid_we =  wb_inst_tlbrd  ? 1'b1 : 1'b0;
-    assign csr_asid_asid_wvalue =  (wb_inst_tlbrd && tlb_r_e ) ?   tlb_r_asid : 10'b0  ;
+    assign csr_asid_asid_wvalue =  tlbrd_entry_valid ?   tlb_r_asid : 10'b0  ;
 
     assign csr_tlbidx_index_we = (wb_inst_tlbsrch && tlb_s2_found);
     assign csr_tlbidx_index_wvalue  = tlb_s2_index;
