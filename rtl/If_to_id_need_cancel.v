@@ -8,6 +8,7 @@ module If_to_id_need_cancel (
     input wire         if_ready_go,
     input wire         id_allow_in,
     input wire         id_br_taken,
+    input wire         id_is_ertn,
     input wire         pipline_is_not_stalled,
     input wire         pre_if_ready_go,
     input wire         if_allow_in,
@@ -15,7 +16,7 @@ module If_to_id_need_cancel (
 );
 
     // 状态定义
-    localparam STATE_NORMAL     = 2'b0;  // 正常状态         
+    localparam STATE_NORMAL     = 2'b0;  // 正常状态
     localparam STATE_NOT_NORMAL_one = 2'b1;  // 非正常状态,需要取消1次
     localparam STATE_NOT_NORMAL_two = 2'b10;
     // 状态寄存器声明
@@ -24,8 +25,8 @@ module If_to_id_need_cancel (
 
     // (1) 状态寄存器时序逻辑
     always @(posedge clk) begin
-        if (rst) begin
-            state_curr <= STATE_NORMAL;  // 复位后进入正常状态
+        if (rst || wb_ex) begin
+            state_curr <= STATE_NORMAL;  // 复位或异常后进入正常状态
         end else begin
             state_curr <= state_next;   // 状态转移
         end
@@ -37,14 +38,17 @@ module If_to_id_need_cancel (
             STATE_NORMAL: begin
                 if(id_br_taken===1'b1&&pipline_is_not_stalled && pre_if_ready_go && if_allow_in)
                 begin
-                    state_next = STATE_NOT_NORMAL_two;
-                end
-                else if ((id_br_taken===1'b1&&pipline_is_not_stalled) || (((inst_sram_req==1'b1&&inst_sram_addr_ok==1'b0))&&wb_ex===1'b1) ) begin
                     state_next = STATE_NOT_NORMAL_one;
+                end
+                else if (id_br_taken===1'b1&&pipline_is_not_stalled) begin
+                    state_next = STATE_NOT_NORMAL_one;
+                end
+                else if ((inst_sram_req==1'b1&&inst_sram_addr_ok==1'b0)&&wb_ex===1'b1) begin
+                    state_next = STATE_NOT_NORMAL_two;
                 end
                 else if(wb_ex===1'b1&&(inst_sram_addr_ok==1'b1 || inst_sram_req==1'b0)&&(if_ready_go && id_allow_in))
                 begin
-                    state_next = STATE_NOT_NORMAL_one;
+                    state_next = STATE_NOT_NORMAL_two;
                 end
                 else if(wb_ex===1'b1&&(inst_sram_addr_ok==1'b1 || inst_sram_req==1'b0))
                 begin
@@ -55,7 +59,7 @@ module If_to_id_need_cancel (
                     state_next = STATE_NORMAL;
                 end
             end
-            
+
             STATE_NOT_NORMAL_one: begin
                 // 当数据OK时返回正常状态
                 if (!(if_ready_go===1'b0)&& id_allow_in&&wb_ex!=1'b1) begin
@@ -94,6 +98,7 @@ module If_to_id_need_cancel (
         endcase
     end
 
-   
+
+   // Registered cancel.
    assign id_need_cancel = state_curr;
 endmodule

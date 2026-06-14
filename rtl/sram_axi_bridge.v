@@ -77,133 +77,69 @@ module axi_bridge (
     parameter read_waiting_data = 2'b11;
     reg [1:0]read_next_state;
 
-    wire [1:0]read_type;               // 0表示指令读请求，1表示数据读请求,2表示都不是
-    assign read_type =   (data_sram_req && data_sram_wr == 1'b0)?   2'b01 :
-                         (inst_sram_req && inst_sram_wr == 1'b0) ?  2'b0 :  2'b10;
-    
-    reg cur_reading;
+    wire read_req_valid;
+    wire read_req_is_data;
+    wire [31:0] read_req_addr;
+    wire [2:0] read_req_size;
 
-    //读请求信号
-    always @(posedge clk)
-    begin
-        if(rst)
-        begin
+    assign read_req_valid   = (data_sram_req && data_sram_wr == 1'b0) ||
+                              (inst_sram_req && inst_sram_wr == 1'b0);
+    assign read_req_is_data = (data_sram_req && data_sram_wr == 1'b0);
+    assign read_req_addr    = read_req_is_data ? data_sram_addr : inst_sram_addr;
+    assign read_req_size    = read_req_is_data ? (data_sram_size == 2'b0  ? 3'd0 :
+                                                  data_sram_size == 2'b1  ? 3'd1 :
+                                                  data_sram_size == 2'b10 ? 3'd2 : 3'd0) :
+                                                  3'd2;
+
+    reg        read_hold_is_data;
+    reg [31:0] read_hold_addr;
+    reg [2:0]  read_hold_size;
+
+    wire read_use_hold;
+    wire read_sel_is_data;
+    assign read_use_hold    = (read_cur_state == read_waiting_ready) || (read_cur_state == read_waiting_data);
+    assign read_sel_is_data = read_use_hold ? read_hold_is_data : read_req_is_data;
+
+    // Read address channel.  Once ARVALID is asserted, keep ARID/ARADDR/ARSIZE
+    // stable until ARREADY accepts the request.
+    always @(posedge clk) begin
+        if (rst) begin
             read_cur_state <= read_empty;
-        end
-        else
-        begin
+            read_hold_is_data <= 1'b0;
+            read_hold_addr <= 32'b0;
+            read_hold_size <= 3'b0;
+        end else begin
             read_cur_state <= read_next_state;
+            if (read_cur_state == read_empty && read_req_valid) begin
+                read_hold_is_data <= read_req_is_data;
+                read_hold_addr <= read_req_addr;
+                read_hold_size <= read_req_size;
+            end
         end
     end
-    always @(*)
-    begin
+
+    always @(*) begin
         case (read_cur_state)
-         read_empty   :
-         begin
-            if(arvalid && arready)
-            begin
-                read_next_state = read_waiting_data;
-                arid  =  {3'b0,{read_type==2'b1}};
-                cur_reading = read_type == 2'b1;
-            end
-            else if(arvalid)
-            begin
-                read_next_state = read_waiting_ready ;
-                arid  =  {3'b0,{read_type==2'b1}};
-                cur_reading = read_type == 2'b1;
-            end
-            else if(arready)
-            begin
-                read_next_state = read_waiting_valid;
-                arid  =  {3'b0,{read_type==2'b1}};
-                cur_reading = read_type == 2'b1;
-            end
-            else
-            begin
+            read_empty:
+                read_next_state = (read_req_valid && arready) ? read_waiting_data :
+                                  read_req_valid              ? read_waiting_ready :
+                                                                read_empty;
+            read_waiting_ready:
+                read_next_state = arready ? read_waiting_data : read_waiting_ready;
+            read_waiting_data:
+                read_next_state = rvalid ? read_empty : read_waiting_data;
+            default:
                 read_next_state = read_empty;
-                arid  =  {3'b0,{read_type==2'b1}};
-            end
-         end 
-         read_waiting_valid  :
-         begin
-            if(arvalid)
-            begin
-                read_next_state = read_waiting_data;
-            end
-            else
-            begin
-                read_next_state = read_waiting_valid ;
-                arid  =  {3'b0,{read_type==2'b1}};
-            end
-         end
-         read_waiting_ready :
-         begin
-            if(arready)
-            begin
-                read_next_state = read_waiting_data;
-            end
-            else
-            begin
-                read_next_state = read_waiting_ready;
-                arid  =  {3'b0,{read_type==2'b1}};
-            end
-         end
-         read_waiting_data:
-         begin
-            if(rvalid)
-            begin
-                read_next_state = read_empty;
-                arid  =  {3'b0,{read_type==2'b1}};
-            end
-            else
-            begin
-                read_next_state = read_waiting_data;
-                arid  =  {3'b0,{read_type==2'b1}};
-            end
-         end
         endcase
     end
-    always @(posedge clk)
-    begin
-        if(rst)
-        begin
-            arsize <= 3'b0;
-            //arid <= 4'b0;
-        end
-        else if((read_cur_state == read_empty && read_next_state != read_empty)|| (read_cur_state == read_waiting_data && read_next_state==read_empty))
-        begin
-            arsize <= read_type==2'b0 ?  3'd2 :
-                      read_type==2'b1 && data_sram_size== 2'b0 ?  3'd0 :
-                      read_type==2'b1 && data_sram_size== 2'b1 ?  3'd1 :
-                      read_type==2'b1 && data_sram_size== 2'b10 ? 3'd2 : 3'd0;
-            //arid  <=  {3'b0,{read_type==2'b1}};
-        end
-        else if(read_cur_state == read_empty && read_next_state == read_empty)
-        begin
-             arsize <= read_type==2'b0 ?  3'd2 :
-                      read_type==2'b1 && data_sram_size== 2'b0 ?  3'd0 :
-                      read_type==2'b1 && data_sram_size== 2'b1 ?  3'd1 :
-                      read_type==2'b1 && data_sram_size== 2'b10 ? 3'd2 : 3'd0;
-             //arid  <=  {3'b0,{read_type==2'b1}};
-        end
-        else if(read_cur_state ==  read_next_state )
-        begin
-            arsize <= arsize;
-            //arid  <= arid ;
-        end
-        else 
-        begin
-            arsize <= read_type==2'b0 ?  3'd2 :
-                      read_type==2'b1 && data_sram_size== 2'b0 ?  3'd0 :
-                      read_type==2'b1 && data_sram_size== 2'b1 ?  3'd1 :
-                      read_type==2'b1 && data_sram_size== 2'b10 ? 3'd2 : 3'd0;
-            //arid  <=  {3'b0,{read_type==2'b1}};
-        end
+
+    always @(*) begin
+        arid   = {3'b0, read_sel_is_data};
+        arsize = read_use_hold ? read_hold_size : read_req_size;
     end
-     assign  araddr = read_type==2'b01 ?  data_sram_addr :  
-                        read_type==2'b0  ?    inst_sram_addr : 32'b0;
-   
-    assign arvalid = ( (inst_sram_req && inst_sram_wr == 1'b0) || (data_sram_req && data_sram_wr == 1'b0) ) && read_cur_state != read_waiting_data;
+
+    assign araddr  = read_use_hold ? read_hold_addr : read_req_addr;
+    assign arvalid = (read_cur_state == read_empty && read_req_valid) || (read_cur_state == read_waiting_ready);
     assign arprot  = 3'b0;
     assign arcache = 4'b0;
     assign arlock  = 2'b0;
@@ -312,14 +248,45 @@ module axi_bridge (
         endcase
     end
 
-    //inst_sram
-    assign inst_sram_addr_ok = arready && arid==4'b0 && cur_reading == 1'b0;
-    assign inst_sram_data_ok = rvalid===1'b1 && rid==4'b0;
-    assign inst_sram_rdata = rid==4'b0 ? rdata :32'b0;
+    // DEBUG: track AXI AR handshake
+    always @(posedge aclk) begin
+        if (aresetn && arvalid && arready)
+            $display("[AXI-AR] %0t: araddr=%h arid=%h arsize=%d read_state=%d",
+                $time, araddr, arid, arsize, read_cur_state);
+    end
+    // DEBUG: track AXI R response
+    always @(posedge aclk) begin
+        if (aresetn && rvalid && rready)
+            $display("[AXI-R]  %0t: rdata=%h rid=%h",
+                $time, rdata, rid);
+    end
 
-    //data_sram
-    assign data_sram_addr_ok = (data_sram_wr == 1'b0 && arready && arid==4'b1 && cur_reading == 1'b1)||(data_sram_wr== 1'b1 && write_next_state==write_waiting_success) ;
-    assign data_sram_data_ok = (rvalid===1'b1 && rid==4'b1) || (bvalid&&bready && write_cur_state == write_waiting_success); 
-    assign data_sram_rdata  =  rid==1'b1 ? rdata :32'b0;
+    // Buffer AXI read response to filter spurious rvalid beats
+    reg         r_buf_rvalid;
+    reg [3:0]   r_buf_rid;
+    reg [31:0]  r_buf_rdata;
+    always @(posedge aclk) begin
+        if(!aresetn) r_buf_rvalid <= 0;
+        else r_buf_rvalid <= rvalid;
+    end
+    always @(posedge aclk) begin
+        if(!aresetn) r_buf_rid <= 0;
+        else r_buf_rid <= rid;
+    end
+    always @(posedge aclk) begin
+        if(!aresetn) r_buf_rdata <= 0;
+        else r_buf_rdata <= rdata;
+    end
+
+    //inst_sram — use buffered response
+    assign inst_sram_addr_ok = arvalid && arready && arid==4'b0 && read_sel_is_data == 1'b0;
+    assign inst_sram_data_ok = r_buf_rvalid && r_buf_rid == 4'b0;
+    assign inst_sram_rdata = r_buf_rid == 4'b0 ? r_buf_rdata : 32'b0;
+
+    //data_sram — use buffered response
+    assign data_sram_addr_ok = (data_sram_wr == 1'b0 && arvalid && arready && arid==4'b1 && read_sel_is_data == 1'b1)
+                           ||(data_sram_wr== 1'b1 && write_next_state==write_waiting_success);
+    assign data_sram_data_ok = (r_buf_rvalid && r_buf_rid == 4'b1) || (bvalid&&bready && write_cur_state == write_waiting_success);
+    assign data_sram_rdata  =  r_buf_rid == 4'b1 ? r_buf_rdata : 32'b0;
 
 endmodule

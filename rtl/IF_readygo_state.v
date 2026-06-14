@@ -1,6 +1,7 @@
 module IF_readygo_state (
     input wire clk,
     input wire rst,
+    input wire flush,
     input wire id_allow_in,
     input wire if_ready_go,
     output wire IF_ready_go
@@ -13,7 +14,7 @@ module IF_readygo_state (
 
     always @(posedge clk)
     begin
-        if(rst)
+        if(rst || flush)
         begin
             st_cur <= notreadygo;
         end
@@ -44,7 +45,7 @@ module IF_readygo_state (
                 end
                 else
                 begin
-                    st_next <= notreadygo;
+                    st_next = notreadygo;
                 end
         endcase
     end

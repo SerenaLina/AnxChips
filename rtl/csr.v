@@ -84,6 +84,7 @@
 module CSRREG (
     input wire clk,
     input wire rst,
+    input wire timer_advance,       // gated: 0 during replay cycles
     input wire [13:0]csr_num,      //寄存器编�????,相当于地�????，手�????7.1节有规定
     input wire csr_we,             //写使�????
     input wire [31:0] csr_wmask,    //掩码，用于写操作
@@ -114,8 +115,8 @@ module CSRREG (
     output reg [63:0]csr_timer_64,
     output reg [31:0]csr_tid_tid,
     output reg [5:0]csr_estat_ecode,
-    output reg csr_tlbidx_ne,
-    output reg [5:0]csr_tlbidx_ps,
+    output wire csr_tlbidx_ne,
+    output wire [5:0]csr_tlbidx_ps,
     output reg csr_tlbelo0_d,
     output reg csr_tlbelo0_g,
     output reg csr_tlbelo0_v,
@@ -132,7 +133,8 @@ module CSRREG (
 
     input wire [3:0]csr_tlbidx_index_wvalue,
     input wire csr_tlbidx_index_we,
-    output reg [3:0] csr_tlbidx_index,
+    output wire [3:0] csr_tlbidx_index,
+    output wire csr_tlbidx_index_invalid,
     input wire csr_tlbidx_ne_we,
     input wire csr_tlbidx_ne_wvalue,
     input wire csr_tlbidx_ps_we,
@@ -188,10 +190,16 @@ module CSRREG (
     output reg [2:0] csr_dmw1_vseg,
     output reg csr_crmd_pg,
     output reg csr_crmd_da,
+    output reg [1:0] csr_crmd_datf,
+    output reg [1:0] csr_crmd_datm,
     output reg [1:0]csr_crmd_plv,
     input wire csr_inst_tlb_refill,
     input wire csr_data_tlb_refill,
     output reg [25:0] csr_tlbrentry
+`ifdef DIFFTEST_EN
+    ,
+    output wire [831:0] csr_all_diff
+`endif
 
 );
 
@@ -199,9 +207,6 @@ module CSRREG (
     reg [1:0]csr_prmd_pplv;
 
     reg csr_prmd_pie;
-
-    reg [1:0]csr_crmd_datf;
-    reg [1:0]csr_crmd_datm;
 
 
     reg [8:0]csr_estat_esubcode;
@@ -300,10 +305,13 @@ module CSRREG (
         end
         else if(wb_ex)
         begin
+            $display("[CSR-EX] %0t: wb_ex=1 crmd_plv<=0 (old=%b)", $time, csr_crmd_plv);
             csr_crmd_plv<=2'b0;
         end
         else if(wb_ertn_flush)
         begin
+            $display("[CSR-ERTN] %0t: ertn_flush=1 pplv=%b crmd_plv_old=%b",
+                $time, csr_prmd_pplv, csr_crmd_plv);
             csr_crmd_plv<=csr_prmd_pplv;
         end
         else if(csr_we && csr_num == `CSR_CRMD)
@@ -337,13 +345,15 @@ module CSRREG (
     begin
         if(wb_ex)
         begin
+            $display("[CSR-EX] %0t: save prmd pplv=%b pie=%b from crmd_plv=%b crmd_ie=%b",
+                $time, csr_crmd_plv, csr_crmd_ie, csr_crmd_plv, csr_crmd_ie);
             csr_prmd_pplv<=csr_crmd_plv;
             csr_prmd_pie<=csr_crmd_ie;
         end
         else if(csr_we && csr_num==`CSR_PRMD)
         begin
             csr_prmd_pplv <= csr_wmask[`CSR_PRMD_PPLV]&csr_wvalue[`CSR_PRMD_PPLV] | ~csr_wmask[`CSR_PRMD_PPLV]&csr_prmd_pplv;
-            csr_prmd_pie  <= csr_wmask[`CSR_PRMD_PIE]&csr_wvalue[`CSR_PRMD_PIE]  | ~csr_wvalue[`CSR_PRMD_PIE]&csr_prmd_pie;
+            csr_prmd_pie  <= csr_wmask[`CSR_PRMD_PIE]&csr_wvalue[`CSR_PRMD_PIE]  | ~csr_wmask[`CSR_PRMD_PIE]&csr_prmd_pie;
         end
     end
 
@@ -493,54 +503,26 @@ module CSRREG (
 
 
 // waiting for revise
-    always @(posedge clk)
-    begin
-        if(rst)
-        begin
-            csr_tlbidx_ne <= 1'b0;
-        end
-        else if(csr_we && csr_num == `CSR_TLBIDX)
-        begin
-            csr_tlbidx_ne <=csr_wmask[`CSR_TLBIDX_NE] & csr_wvalue[`CSR_TLBIDX_NE] | ~csr_wmask[`CSR_TLBIDX_NE] &csr_tlbidx_ne;
-        end
-        else if(csr_tlbidx_ne_we)
-        begin
-            csr_tlbidx_ne <= csr_tlbidx_ne_wvalue;
-        end
-    end
-
-      always @(posedge clk)
-    begin
+    // Full 32-bit TLBIDX register
+    reg [31:0] csr_tlbidx_full;
+    always @(posedge clk) begin
         if (rst)
-        begin
-            csr_tlbidx_index <= 4'b0;
-        end
-        else if(csr_we && csr_num == `CSR_TLBIDX)
-        begin
-            csr_tlbidx_index <=csr_wmask[`CSR_TLBIDX_INDEX] & csr_wvalue[`CSR_TLBIDX_INDEX] | ~csr_wmask[`CSR_TLBIDX_INDEX] &csr_tlbidx_index;
-        end
-        else if (csr_tlbidx_index_we)
-        begin
-                csr_tlbidx_index <= csr_tlbidx_index_wvalue;
-        end
+            csr_tlbidx_full <= 32'b0;
+        else if (csr_we && csr_num == `CSR_TLBIDX)
+            csr_tlbidx_full <= (csr_wmask & csr_wvalue) | (~csr_wmask & csr_tlbidx_full);
+        else if (csr_tlbidx_ne_we || csr_tlbidx_ps_we || csr_tlbidx_index_we)
+            csr_tlbidx_full <= {csr_tlbidx_ne_we ? csr_tlbidx_ne_wvalue : csr_tlbidx_ne,
+                                1'b0,
+                                csr_tlbidx_ps_we ? csr_tlbidx_ps_wvalue : csr_tlbidx_ps,
+                                csr_tlbidx_full[23:16],
+                                csr_tlbidx_full[15:4],
+                                csr_tlbidx_index_we ? csr_tlbidx_index_wvalue : csr_tlbidx_index};
     end
 
-
-    always @(posedge clk)
-    begin
-        if (rst)
-        begin
-            csr_tlbidx_ps <= 6'b0;
-        end
-        else if(csr_we && csr_num == `CSR_TLBIDX)
-        begin
-            csr_tlbidx_ps <=csr_wmask[`CSR_TLBIDX_PS] & csr_wvalue[`CSR_TLBIDX_PS] | ~csr_wmask[`CSR_TLBIDX_PS] &csr_tlbidx_ps;
-        end
-        else if (csr_tlbidx_ps_we)
-        begin
-                csr_tlbidx_ps <= csr_tlbidx_ps_wvalue;
-        end
-    end
+    assign csr_tlbidx_ne    = csr_tlbidx_full[31];
+    assign csr_tlbidx_ps    = csr_tlbidx_full[29:24];
+    assign csr_tlbidx_index = csr_tlbidx_full[3:0];
+    assign csr_tlbidx_index_invalid = |csr_tlbidx_full[15:4];
 
     always @(posedge clk)
     begin
@@ -917,7 +899,7 @@ module CSRREG (
     always @(posedge clk) begin
     if (rst)
         csr_timer_64 <= 64'd0;
-    else
+    else if (timer_advance)
         csr_timer_64 <= csr_timer_64 + 64'd1;
     end
 
@@ -941,13 +923,65 @@ module CSRREG (
     wire [31:0] csr_tid_rvalue =csr_tid_tid;
     wire [31:0] csr_tcfg_rvalue ={1'b0,csr_tcfg_initval,csr_tcfg_periodic,csr_tcfg_en};
     wire [31:0] csr_asid_rvalue ={8'b0,8'b1010,6'b0,csr_asid_asid};
-    wire [31:0] csr_tlbidx_rvalue ={csr_tlbidx_ne,1'b0,csr_tlbidx_ps,8'b0,12'b0,csr_tlbidx_index};
+    wire [31:0] csr_tlbidx_rvalue = csr_tlbidx_full;
+    // DEBUG: check if csr_wvalue has bits outside the stored sub-fields
+    always @(posedge clk) begin
+        if (!rst && csr_we && csr_num == `CSR_TLBIDX) begin
+            $display("[TLBIDX-WR] %0t: wvalue=%h wmask=%h", $time, csr_wvalue, csr_wmask);
+            $display("[TLBIDX-WR]   bits-split: ne_wr=%b ps_wr=%h idx_wr=%h",
+                csr_wvalue[`CSR_TLBIDX_NE], csr_wvalue[`CSR_TLBIDX_PS], csr_wvalue[`CSR_TLBIDX_INDEX]);
+            $display("[TLBIDX-WR]   lost-bits[30]=%b lost[23:16]=%h lost[15:4]=%h",
+                csr_wvalue[30], csr_wvalue[23:16], csr_wvalue[15:4]);
+            $display("[TLBIDX-WR]   result-rvalue=%h", csr_tlbidx_rvalue);
+        end
+    end
+    reg  [31:0] prev_tlbidx;
+    always @(posedge clk) begin
+        prev_tlbidx <= csr_tlbidx_rvalue;
+        if (!rst && prev_tlbidx != csr_tlbidx_rvalue)
+            $display("[TLBIDX-CHG] %0t: old=%h new=%h ne=%b ps=%h idx=%h",
+                $time, prev_tlbidx, csr_tlbidx_rvalue,
+                csr_tlbidx_ne, csr_tlbidx_ps, csr_tlbidx_index);
+    end
     wire [31:0] csr_tlbehi_rvalue ={csr_tlbehi,13'b0};
     wire [31:0] csr_tlbelo0_rvalue ={4'b0,csr_tlbelo0_ppn,1'b0,csr_tlbelo0_g,csr_tlbelo0_mat,csr_tlbelo0_plv,csr_tlbelo0_d,csr_tlbelo0_v};
     wire [31:0] csr_tlbelo1_rvalue ={4'b0,csr_tlbelo1_ppn,1'b0,csr_tlbelo1_g,csr_tlbelo1_mat,csr_tlbelo1_plv,csr_tlbelo1_d,csr_tlbelo1_v};
     wire [31:0] csr_tlbrentry_rvalue ={csr_tlbrentry,6'b0};
     wire [31:0] csr_dmw0_rvalue ={csr_dmw0_vseg,1'b0,csr_dmw0_pseg,19'b0,csr_dmw0_mat,csr_dmw0_plv3,2'b0,csr_dmw0_plv0};
     wire [31:0] csr_dmw1_rvalue ={csr_dmw1_vseg,1'b0,csr_dmw1_pseg,19'b0,csr_dmw1_mat,csr_dmw1_plv3,2'b0,csr_dmw1_plv0};
+
+`ifdef DIFFTEST_EN
+    // difftest CSR bus: 26 slots x 32 bits = 832 bits
+    // slot order matching difftest.h arch_csr_state_t and serval_cat
+    assign csr_all_diff = {
+        csr_crmd_rvalue,        // [831:800] slot 25
+        csr_prmd_rvalue,        // [799:768] slot 24
+        csr_ecfg_rvalue,        // [767:736] slot 23 (euen skipped, hardcoded 0 in DPI)
+        csr_estat_rvalue,       // [735:704] slot 22
+        csr_era_rvalue,         // [703:672] slot 21
+        csr_badv_rvalue,        // [671:640] slot 20
+        csr_eentry_rvalue,      // [639:608] slot 19
+        csr_tlbidx_rvalue,      // [607:576] slot 18
+        csr_tlbehi_rvalue,      // [575:544] slot 17
+        csr_tlbelo0_rvalue,     // [543:512] slot 16
+        csr_tlbelo1_rvalue,     // [511:480] slot 15
+        csr_asid_rvalue,        // [479:448] slot 14
+        32'h0,                  // [447:416] slot 13 pgdl (not implemented)
+        32'h0,                  // [415:384] slot 12 pgdh (not implemented)
+        csr_save0_rvalue,       // [383:352] slot 11
+        csr_save1_rvalue,       // [351:320] slot 10
+        csr_save2_rvalue,       // [319:288] slot 9
+        csr_save3_rvalue,       // [287:256] slot 8
+        csr_tid_rvalue,         // [255:224] slot 7
+        csr_tcfg_rvalue,        // [223:192] slot 6
+        csr_tval,               // [191:160] slot 5 tval
+        32'h0,                  // [159:128] slot 4 ticlr (not implemented)
+        32'h0,                  // [127:96]  slot 3 llbctl (not implemented)
+        csr_tlbrentry_rvalue,   // [95:64]   slot 2
+        csr_dmw0_rvalue,        // [63:32]   slot 1
+        csr_dmw1_rvalue         // [31:0]    slot 0
+    };
+`endif
 
     assign csr_rvalue={32{csr_num==`CSR_CRMD}}  &  csr_crmd_rvalue
                     | {32{csr_num==`CSR_PRMD}}  &  csr_prmd_rvalue
