@@ -168,7 +168,7 @@ module icache_two_way(
                     end
                 end
                 S_HIT_RESP: begin
-                    state <= S_IDLE;
+                    state <= fetch_req ? S_IDLE : S_HIT_RESP;
                 end
                 S_UNC_REQ: begin
                     if (mem_addr_ok) begin
@@ -209,7 +209,7 @@ module icache_two_way(
                     end
                 end
                 S_REF_RESP: begin
-                    state <= S_IDLE;
+                    state <= fetch_req ? S_IDLE : S_REF_RESP;
                 end
                 S_CACOP_RESP: begin
                     state <= S_IDLE;

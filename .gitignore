@@ -1,2 +1,12 @@
-Anx/
-Anx_circut/
+# Ignore everything by default
+/*
+
+# Allow .gitignore itself
+!.gitignore
+
+# Allow rtl directory (needed for git to descend into it)
+!rtl/
+
+# Inside rtl/, ignore everything except .v files
+rtl/*
+!rtl/*.v

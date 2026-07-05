@@ -248,19 +248,7 @@ module axi_bridge (
         endcase
     end
 
-    // DEBUG: track AXI AR handshake
-    always @(posedge aclk) begin
-        if (aresetn && arvalid && arready)
-            $display("[AXI-AR] %0t: araddr=%h arid=%h arsize=%d read_state=%d",
-                $time, araddr, arid, arsize, read_cur_state);
-    end
-    // DEBUG: track AXI R response
-    always @(posedge aclk) begin
-        if (aresetn && rvalid && rready)
-            $display("[AXI-R]  %0t: rdata=%h rid=%h",
-                $time, rdata, rid);
-    end
-
+    /* AXI debug removed */
     // Buffer AXI read response to filter spurious rvalid beats
     reg         r_buf_rvalid;
     reg [3:0]   r_buf_rid;

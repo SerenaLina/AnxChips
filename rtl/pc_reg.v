@@ -18,7 +18,7 @@ module PC_Reg(
     output wire [31:0] inst_addr,
     output reg [1:0] if_inst_tlb_ex
 );
-    
+
     reg [31:0]nextpc;
     assign inst_en = rst? 1'b0 : 1'b1;
 
@@ -53,28 +53,26 @@ module PC_Reg(
         if_pc <= pc_br_target;
         nextpc <= pc_br_target;
         if_inst_tlb_ex <= 2'b0;
+    // Branch redirect taken outside casez(if_allow_in) so it fires even
+    // when IF is stalled (if_allow_in=0).  Under RUN_PERF_TEST the long
+    // R-delay makes if_allow_in stay 0 for many cycles; a one-cycle
+    // pc_br_taken pulse would be missed, causing PC to advance past the
+    // branch into invalid padding and raise spurious INE exceptions.
+    end else if (pc_br_taken && pipline_is_not_stalled && !pc_br_taken_memory) begin
+        if_pc <= nextpc;
+        nextpc <= pc_br_target;
+        if_inst_tlb_ex <= inst_tlb_ex;
+    end else if (pc_br_taken_memory===1'b1) begin
+        if_pc <= nextpc;
+        nextpc <= (nextpc == pc_target_memory) ? nextpc + 32'd4 : pc_target_memory;
+        if_inst_tlb_ex <= inst_tlb_ex;
     end else begin
         casez (!(pre_if_ready_go===1'b0)&&if_allow_in)
             1'b1:
             begin
-            if(pc_br_taken && pipline_is_not_stalled && !pc_br_taken_memory)
-            begin
-            if_pc <= nextpc;
-            nextpc <= pc_br_target;
-            if_inst_tlb_ex <= inst_tlb_ex;
-            end
-            else if(pc_br_taken_memory===1'b1)
-            begin
-            if_pc <= nextpc;
-            nextpc <=  (nextpc == pc_target_memory) ? nextpc + 32'd4 : pc_target_memory ;
-            if_inst_tlb_ex <= inst_tlb_ex ;
-            end
-            else
-            begin
             if_pc <= nextpc;
             nextpc <= btb_hit ? btb_target : nextpc + 32'd4;
             if_inst_tlb_ex <= inst_tlb_ex;
-            end
             end
             1'b0:
             begin
@@ -84,24 +82,9 @@ module PC_Reg(
             end
             default:
             begin
-            if(pc_br_taken && pipline_is_not_stalled && !pc_br_taken_memory)
-            begin
-            if_pc <= nextpc;
-            nextpc <= pc_br_target;
-            if_inst_tlb_ex <= inst_tlb_ex;
-            end
-            else if(pc_br_taken_memory===1'b1)
-            begin
-            if_pc <= nextpc;
-            nextpc <=  (nextpc == pc_target_memory) ? nextpc + 32'd4 : pc_target_memory ;
-            if_inst_tlb_ex <= inst_tlb_ex;
-            end
-            else
-            begin
             if_pc <= nextpc;
             nextpc <= btb_hit ? btb_target : nextpc + 32'd4;
             if_inst_tlb_ex <= inst_tlb_ex;
-            end
             end
         endcase
     end

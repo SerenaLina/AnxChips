@@ -315,7 +315,7 @@ module core_top(
         if (rst || wb_is_ertn || wb_ex) begin
             br_need_cancel <= 1'b0;
             br_delay_slot_pc <= 32'b0;
-        end else if (id_br_taken_safe) begin
+        end else if (id_br_redirect) begin
             br_need_cancel <= 1'b1;
             br_delay_slot_pc <= id_pc + 32'd4;
         end else if (br_need_cancel && !(if_ready_go===1'b0) && id_allow_in) begin
@@ -327,23 +327,12 @@ module core_top(
     assign br_cancel_fallthrough = br_need_cancel && (if_pc == br_delay_slot_pc);
 
     assign if_inst = rst ? 32'h02800000 :
-                     ((id_br_taken_safe) || br_cancel_fallthrough) ? 32'h02800000 :
+                     (id_br_redirect || br_cancel_fallthrough) ? 32'h02800000 :
                      real_inst_data_ok ? inst_sram_rdata :
                      inst_sram_rdata_safe_valid ? inst_sram_rdata_safe : 32'h02800000;
 
     // DEBUG: verify post-redirect fetch
-    reg dbg_redirected;
-    always @(posedge clk) begin
-        if (rst)                              dbg_redirected <= 1'b0;
-        else if (wb_ex || wb_is_ertn)         dbg_redirected <= 1'b1;
-        else if (inst_sram_data_ok && inst_sram_addr_ok)           dbg_redirected <= 1'b0;
-    end
-    always @(posedge clk) begin
-        if (!rst && dbg_redirected)
-            $display("[POST-EX] %0t: id_inst=%h id_need_cancel=%b if_inst=%h if_pc=%h data_ok=%h pre_if_ready_go=%b rdata=%h if_inst=%h next_addr=%h",
-                $time, id_inst, id_need_cancel, if_inst, if_pc,
-                inst_sram_data_ok && inst_sram_addr_ok, pre_if_ready_go, inst_sram_rdata, if_inst, inst_sram_addr);
-    end
+    /* POST-EX debug removed */
 
     // === BTB update on id_br_taken ===
     wire [31:0]id_src1;
@@ -371,8 +360,10 @@ module core_top(
    // wire id_cancel;   //跳转的话，需要置�???????1
     wire id_br_taken;
     wire id_br_taken_safe;
-    assign id_br_taken_safe = id_br_taken && pipline_is_not_stalled;
     wire [31:0]id_br_target;
+    wire id_br_redirect;
+    assign id_br_taken_safe = id_br_taken && pipline_is_not_stalled;
+    assign id_br_redirect = id_br_taken_safe && (id_br_target != id_pc + 32'd4);
     wire id_src1_from_ref;
     wire id_src2_from_ref;
     wire id_zero_extend; //如果第二个操作数是立即数，�?�且�????要零扩展，是的话�????1，否则的话为0
@@ -520,29 +511,7 @@ module core_top(
                          rf_rdata1;
     assign id_csr_wmask = id_csr_mask_all_one? 32'hffffffff : id_src1_fwd;
 
-    // DEBUG: csrwr forwarding trace
-    wire is_csrwr = (id_inst[31:24] == 8'h04) && (id_inst[25:24] == 2'b00) && (id_inst[9:5] == 5'd1);
-    always @(posedge clk) begin
-        if (!rst && (is_csrwr || id_csr_we)) begin
-            $display("[CSR-FWD] %0t: id_inst=%h csrwe=%b src2_fwd=%h rf_raddr2=%d rf_rdata2=%h",
-                $time, id_inst, id_csr_we, id_src2_fwd, rf_raddr2, rf_rdata2);
-            $display("[CSR-FWD]   exe1_rwe=%b exe1_rd=%d exe1_res=%h exe2_rwe=%b exe2_rd=%d exe2_res=%h",
-                exe1_ref_we, exe1_rd, exe1_alu_result, exe2_ref_we, exe2_rd, exe2_alu_result);
-            $display("[CSR-FWD]   mem_rwe=%b  mem_rd=%d  mem_res=%h  wb_rwe=%b   wb_rd=%d  wb_res=%h",
-                mem_ref_we, mem_rd, mem_alu_result, wb_rf_we, wb_rd, rf_wdata);
-        end
-    end
-    // DEBUG: track exe1_csr_wdata when it captures csrwr
-    always @(posedge clk) begin
-        if (!rst && exe1_csr_we)
-            $display("[CSR-EXE1] %0t: exe1_csr_wdata=%h exe1_pc=%h",
-                $time, exe1_csr_wdata, exe1_pc);
-    end
-    always @(posedge clk) begin
-        if (!rst && wb_csr_we)
-            $display("[CSR-WB] %0t: wb_csr_wdata=%h wb_csr_num=%d wb_ex=%b wb_pc=%h",
-                $time, wb_csr_wdata, wb_csr_num, wb_ex, wb_pc);
-    end
+    /* CSR-WB debug removed */
 
     assign id_invtlb_asid = rf_rdata1[9:0];
     assign id_invtlb_va = rf_rdata2[31:13];
@@ -677,6 +646,9 @@ module core_top(
 
 
     //wire [31:0]exe_csr_rdata;
+    // Gate INE: suppress on branch-cancelled speculative fetches that
+    // follow a taken branch but haven't been flushed before reaching ID.
+    wire id_ex_ine_gated = id_ex_ine && !br_need_cancel;
     ExE1_reg exe1_reg(
         .clk(clk),
         .rst(rst),
@@ -722,7 +694,7 @@ module core_top(
         .id_csr_wdata(id_csr_wdata),
         .id_ex_adef(id_ex_adef),
         .id_ex_brk(id_ex_brk),
-        .id_ex_ine(id_ex_ine),
+        .id_ex_ine(id_ex_ine_gated),
         .id_ex_ale_h(id_ex_ale_h),
         .id_ex_ale_w(id_ex_ale_w),
         .id_has_int(id_has_int),
@@ -1236,7 +1208,23 @@ module core_top(
     assign mem_cacop_is_i   = mem_is_cacop && (mem_cacop_op[0] == 1'b0);
     assign mem_cacop_is_d   = mem_is_cacop && (mem_cacop_op[0] == 1'b1);
 
-    assign data_sram_wstrb=(wb_ex===1'b1||exe2_ex_ale===1'b1||wb_is_ertn===1'b1 || data_tlb_ex != 3'b0)?    4'b0000:
+    wire mem_trap_pending;
+    wire exe2_self_trap;
+
+    // Stores in EXE2 are younger than the instruction currently in MEM. If MEM
+    // already carries a real exception, the EXE2 store must not issue an
+    // irreversible data write before the exception redirects the pipeline at WB.
+    assign mem_trap_pending = !mem_need_cancel && !mem_is_ertn &&
+                              (mem_has_int || mem_ex_adef || mem_ex_brk || mem_ex_ine ||
+                               mem_ex_ale || mem_is_syscall ||
+                               (mem_inst_tlb_ex != 2'b0) || (mem_data_tlb_ex != 3'b0));
+
+    assign exe2_self_trap = !exe2_need_cancel && !exe2_is_ertn &&
+                            (exe2_has_int || exe2_ex_adef || exe2_ex_brk || exe2_ex_ine ||
+                             exe2_ex_ale || exe2_is_syscall ||
+                             (exe2_inst_tlb_ex != 2'b0) || (data_tlb_ex != 3'b0));
+
+    assign data_sram_wstrb=(wb_ex===1'b1 || wb_is_ertn===1'b1 || mem_trap_pending || exe2_self_trap)?    4'b0000:
                         (exe2_dram_we&&exe2_wdram_num==0)? 4'b1111:
                         (exe2_dram_we&&exe2_wdram_num==1&&data_sram_addr[1:0]==2'b00)?  4'b0001:
                         (exe2_dram_we&&exe2_wdram_num==1&&data_sram_addr[1:0]==2'b01)?4'b0010:
@@ -1248,13 +1236,15 @@ module core_top(
 
     wire normal_data_sram_req;
     wire cacheop_req;
-    assign normal_data_sram_req = data_req_valid & exe2_need_data_sram & mem_allow_in &&(wb_ex!=1'b1) & (!(data_tlb_or_csr_we === 1'b1)) &(data_tlb_ex == 3'b0);
-    assign cacheop_req = data_req_valid & exe2_is_cacop & mem_allow_in &&(wb_ex!=1'b1) & (!(data_tlb_or_csr_we === 1'b1)) &(data_tlb_ex == 3'b0);
+    wire data_side_effect_block;
+    assign data_side_effect_block = (wb_ex===1'b1) || (wb_is_ertn===1'b1) || mem_trap_pending || exe2_self_trap;
+    assign normal_data_sram_req = data_req_valid & exe2_need_data_sram & mem_allow_in && !data_side_effect_block & (!(data_tlb_or_csr_we === 1'b1));
+    assign cacheop_req = data_req_valid & exe2_is_cacop & mem_allow_in && !data_side_effect_block & (!(data_tlb_or_csr_we === 1'b1));
     assign data_sram_req= normal_data_sram_req | cacheop_req;
     assign data_sram_size = exe2_ex_ale_h ? 2'b1 :
                             exe2_ex_ale_w ? 2'b10 :  2'b0;
-    assign exe2_addr_shake_ok = (exe2_need_data_sram || exe2_is_cacop) ?  (data_sram_req&&(data_sram_addr_ok===1'b1) || (data_tlb_ex!=3'b0)) :  1'b1;
-    assign mem_data_shake_ok = (mem_need_data_sram || mem_is_cacop) ?  (data_sram_data_ok===1'b1) : 1'b1;
+    assign exe2_addr_shake_ok = (exe2_need_data_sram || exe2_is_cacop) ?  (data_sram_req&&(data_sram_addr_ok===1'b1) || exe2_self_trap) :  1'b1;
+    assign mem_data_shake_ok = (mem_need_data_sram || mem_is_cacop) ?  (data_sram_data_ok===1'b1 || mem_data_tlb_ex!=3'b0 || mem_trap_pending) : 1'b1;
     assign data_sram_wr = exe2_dram_we;
     assign mem_need_and_data_ok = mem_need_data_sram && (data_sram_data_ok===1'b1);
    // assign data_sram_en=1'b1;
@@ -1512,9 +1502,9 @@ module core_top(
                             1'b1;
     assign exe2_ready_go=   (wb_ex===1'b1)?                                            1'b0:
                             (EXE2_ready_go == 1'b1) ?                                  1'b1 :
-                            (exe2_need_data_sram || exe2_is_cacop) ? ((data_sram_addr_ok===1'b1 && data_sram_req)||(data_tlb_ex!=3'b0)) : 1'b1;
-    assign mem_ready_go=     (wb_ex===1'b1)?                                                 1'b0:
-                            (mem_need_data_sram || mem_is_cacop) ?  (data_sram_data_ok===1'b1||mem_data_tlb_ex != 3'b0) : 1'b1;
+                            (exe2_need_data_sram || exe2_is_cacop) ?                    exe2_addr_shake_ok : 1'b1;
+    assign mem_ready_go=     (wb_ex===1'b1)?                                            1'b0:
+                            (mem_need_data_sram || mem_is_cacop) ?                      mem_data_shake_ok : 1'b1;
     assign pre_if_ready_go =(inst_sram_addr_ok && inst_sram_req)||(inst_tlb_ex != 2'b0);
     //assign if_ready_go =1'b1;
     //assign id_ready_go =1'b1;
@@ -1607,52 +1597,20 @@ module core_top(
         .trap_ertn(trap_ertn)
     );
 
+    /* MEM store trace — memcpy region only */
     always @(posedge clk) begin
-        if (!rst && (
-            id_pc   == 32'h1c06e0c0 || exe1_pc == 32'h1c06e0c0 || exe2_pc == 32'h1c06e0c0 ||
-            mem_pc  == 32'h1c06e0c0 || wb_pc   == 32'h1c06e0c0 || wb_ex)) begin
-            $display("[LAB15-INE] %0t: ID pc=%h inst=%h ine=%b alu=%d rwe=%b rd=%d | E1 pc=%h inst=%h ine=%b alu=%d rwe=%b rd=%d | E2 pc=%h inst=%h ine=%b alu=%d rwe=%b rd=%d | MEM pc=%h inst=%h ine=%b rwe=%b rd=%d | WB pc=%h inst=%h ine=%b ex=%b ecode=%h rwe=%b rd=%d wdata=%h need_cancel=%b",
-                $time,
-                id_pc, id_inst, id_ex_ine, id_alu_op, id_ref_we, id_rd,
-                exe1_pc, exe1_inst, exe1_ex_ine, exe1_alu_op, exe1_ref_we, exe1_rd,
-                exe2_pc, exe2_inst, exe2_ex_ine, exe2_alu_op, exe2_ref_we, exe2_rd,
-                mem_pc, mem_inst, mem_ex_ine, mem_ref_we, mem_rd,
-                wb_pc, wb_inst, wb_ex_ine, wb_ex, wb_ecode, wb_rf_we, wb_rd, rf_wdata, wb_need_cancel);
+        if (!rst && mem_pc >= 32'h1c000184 && mem_pc <= 32'h1c000198) begin
+            if (mem_dram_we)
+                $display("[MEM-ST] %0t: waddr=%h wdata=%h pc=%h",
+                    $time, mem_dram_waddr, mem_dram_wdata, mem_pc);
         end
     end
-
+    /* Exception trace */
     always @(posedge clk) begin
-        if (!rst && (
-            (id_pc   >= 32'h1c06e650 && id_pc   <= 32'h1c06e65c) ||
-            (exe1_pc >= 32'h1c06e650 && exe1_pc <= 32'h1c06e65c) ||
-            (exe2_pc >= 32'h1c06e650 && exe2_pc <= 32'h1c06e65c) ||
-            (mem_pc  >= 32'h1c06e650 && mem_pc  <= 32'h1c06e65c) ||
-            (wb_pc   >= 32'h1c06e650 && wb_pc   <= 32'h1c06e65c))) begin
-            $display("[LAB15-HANG] %0t: ID %h/%h allow=%b ready=%b | E1 %h/%h allow=%b ready=%b | E2 %h/%h allow=%b ready=%b need_data=%b addr=%h req=%b aok=%b | MEM %h/%h allow=%b ready=%b need_data=%b data_ok=%b rdata=%h | WB %h/%h rwe=%b rd=%d wdata=%h | dreq_valid=%b if_ready=%b pipe_ns=%b",
-                $time,
-                id_pc, id_inst, id_allow_in, id_ready_go,
-                exe1_pc, exe1_inst, exe1_allow_in, exe1_ready_go,
-                exe2_pc, exe2_inst, exe2_allow_in, exe2_ready_go, exe2_need_data_sram, data_sram_addr, data_sram_req, data_sram_addr_ok,
-                mem_pc, mem_inst, mem_allow_in, mem_ready_go, mem_need_data_sram, data_sram_data_ok, data_sram_rdata,
-                wb_pc, wb_inst, wb_rf_we, wb_rd, rf_wdata,
-                data_req_valid, if_ready_go, pipline_is_not_stalled);
-        end
-    end
-
-    always @(posedge clk) begin
-        if (!rst && (
-            (if_pc   >= 32'h1c06e650 && if_pc   <= 32'h1c06e660) ||
-            (id_pc   >= 32'h1c06e650 && id_pc   <= 32'h1c06e660) ||
-            (exe1_pc >= 32'h1c06e650 && exe1_pc <= 32'h1c06e660) ||
-            (exe2_pc >= 32'h1c06e650 && exe2_pc <= 32'h1c06e660) ||
-            (mem_pc  >= 32'h1c06e650 && mem_pc  <= 32'h1c06e660) ||
-            (wb_pc   >= 32'h1c06e650 && wb_pc   <= 32'h1c06e660))) begin
-            $display("[LAB15-IF] %0t: if_pc=%h inst_addr=%h req=%b req_valid=%b aok=%b dok=%b real_dok=%b rdata=%h safe_v=%b safe=%h if_inst=%h if_ready=%b id_allow=%b pre_if=%b IF_state=%b",
-                $time, if_pc, inst_sram_addr, inst_sram_req, inst_req_valid,
-                inst_sram_addr_ok, inst_sram_data_ok, real_inst_data_ok, inst_sram_rdata,
-                inst_sram_rdata_safe_valid, inst_sram_rdata_safe, if_inst,
-                if_ready_go, id_allow_in, pre_if_ready_go, IF_ready_go);
-        end
+        if (!rst && wb_ex)
+            $display("[EX] %0t: ecode=%h id_adef=%b wb_adef=%b ale=%b pc=%h dmw0=%h dmw1=%h",
+                $time, wb_ecode, id_ex_adef, wb_ex_adef, wb_ex_ale, wb_pc,
+                csr_dmw0, csr_dmw1);
     end
 
     // Wb_stage current exception detection is handled by trap_unit.
@@ -1925,7 +1883,7 @@ module core_top(
         .inst_sram_addr_ok(inst_sram_addr_ok),
         .if_ready_go(if_ready_go),
         .id_allow_in(id_allow_in),
-        .id_br_taken(id_br_taken_safe),
+        .id_br_taken(id_br_redirect),
         .id_is_ertn(id_is_ertn),
         .pre_if_ready_go(pre_if_ready_go),
         .if_allow_in(if_allow_in),
@@ -1933,7 +1891,7 @@ module core_top(
     );
 
     wire [1:0] id_need_cancel;
-    assign id_need_cancel = ((id_br_taken_safe && !btb_hit_d1) || br_cancel_fallthrough) ? 2'b10 : id_need_cancel_raw;
+    assign id_need_cancel = ((id_br_redirect && !btb_hit_d1) || br_cancel_fallthrough) ? 2'b10 : id_need_cancel_raw;
 
     Data_ram_state data_ram_state(
         .clk(clk),
@@ -1947,13 +1905,37 @@ module core_top(
     id_next_inst_cancel id_next_inst_cancel(
         .clk(clk),
         .rst(rst),
-        .id_br_taken(id_br_taken_safe),
+        .id_br_taken(id_br_redirect),
         .id_is_ertn(id_is_ertn),
         .id_allow_in(id_allow_in),
         .pre_if_ready_go(pre_if_ready_go),
         .if_allow_in(if_allow_in),
         .id_next_inst_cancel(id_inst_cancel)
     );
+
+    // Debug n53_ale_ld_w_ex exception path.
+    // synthesis translate_off
+    always @(posedge clk) begin
+        if (!rst && (
+            (exe1_pc >= 32'h1c075468 && exe1_pc <= 32'h1c07548c) ||
+            (exe2_pc >= 32'h1c075468 && exe2_pc <= 32'h1c07548c) ||
+            (mem_pc  >= 32'h1c075468 && mem_pc  <= 32'h1c07548c) ||
+            (wb_pc   >= 32'h1c075468 && wb_pc   <= 32'h1c07548c) ||
+            (data_sram_addr >= 32'h000cfde0 && data_sram_addr <= 32'h000cfde4) ||
+            (mem_data_addr  >= 32'h000cfde0 && mem_data_addr  <= 32'h000cfde4) ||
+            (wb_data_addr   >= 32'h000cfde0 && wb_data_addr   <= 32'h000cfde4)
+        )) begin
+            $display("[N53_ALEDBG] t=%0t exe1 pc=%h inst=%h src1=%h src2=%h alu=%h ale_h=%b ale_w=%b ale=%b need=%b ld=%b st=%b cancel=%b",
+                     $time, exe1_pc, exe1_inst, alu_src1, alu_src2, exe1_alu_result, exe1_ex_ale_h, exe1_ex_ale_w, exe1_ex_ale, exe1_need_data_sram, exe1_is_ld, exe1_is_st, exe1_need_cancel);
+            $display("[N53_ALEDBG] t=%0t exe2 pc=%h inst=%h alu=%h data_addr=%h re=%b we=%b need=%b ale_h=%b ale_w=%b ale=%b self_trap=%b req=%b wr=%b wstrb=%b addr_ok=%b dtlb_ex=%h cancel=%b",
+                     $time, exe2_pc, exe2_inst, exe2_alu_result, exe2_data_addr, exe2_dram_re, exe2_dram_we, exe2_need_data_sram, exe2_ex_ale_h, exe2_ex_ale_w, exe2_ex_ale, exe2_self_trap, data_sram_req, data_sram_wr, data_sram_wstrb, data_sram_addr_ok, data_tlb_ex, exe2_need_cancel);
+            $display("[N53_ALEDBG] t=%0t mem  pc=%h inst=%h data_addr=%h re=%b we=%b need=%b ale_h=%b ale_w=%b ale=%b trap_pending=%b data_ok=%b dtlb_ex=%h cancel=%b",
+                     $time, mem_pc, mem_inst, mem_data_addr, mem_dram_re, mem_dram_we, mem_need_data_sram, mem_ex_ale_h, mem_ex_ale_w, mem_ex_ale, mem_trap_pending, data_sram_data_ok, mem_data_tlb_ex, mem_need_cancel);
+            $display("[N53_ALEDBG] t=%0t wb   pc=%h inst=%h data_addr=%h ale=%b adef=%b wb_ex=%b ecode=%h esub=%h ale_addr=%h csr_ex=%b cancel=%b inst_tlb=%h data_tlb=%h",
+                     $time, wb_pc, wb_inst, wb_data_addr, wb_ex_ale, wb_ex_adef, wb_ex, wb_ecode, wb_esubcode, wb_ex_ale_addr, csr_ex, wb_need_cancel, wb_inst_tlb_ex, wb_data_tlb_ex);
+        end
+    end
+    // synthesis translate_on
 
     IF_readygo_state If_readygo_state(
         .rst(rst),
@@ -2211,16 +2193,7 @@ module core_top(
     assign tlb_w_vppn =  csr_tlbehi;
     assign tlb_w_ps = csr_tlbidx_ps;
     assign tlb_w_asid = csr_asid_asid;
-    always @(posedge clk) begin
-        if (!rst && wb_tlb_fill_en)
-            $display("[TLB-FILL] %0t: w_index=%d w_vppn=%h w_ps=%h w_asid=%h w_e=%b w_g=%b ne=%b idx=%d",
-                $time, tlb_w_index, tlb_w_vppn, tlb_w_ps, tlb_w_asid, tlb_w_e, tlb_w_g, csr_tlbidx_ne, csr_tlbidx_index);
-    end
-    always @(posedge clk) begin
-        if (!rst && wb_inst_tlbrd)
-            $display("[TLB-RD]  %0t: ne=%b ps=%h idx=%d tlbehi_vppn=%h r_e=%b r_ps=%h asid=%h",
-                $time, csr_tlbidx_ne, csr_tlbidx_ps, csr_tlbidx_index, csr_tlbehi, tlb_r_e, tlb_r_ps, csr_asid_asid);
-    end
+    /* TLB debug removed */
     assign tlb_w_g = csr_tlbelo0_g & csr_tlbelo1_g;
     assign tlb_w_ppn0 = csr_tlbelo0_ppn;
     assign tlb_w_plv0 = csr_tlbelo0_plv;
