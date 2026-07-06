@@ -359,11 +359,29 @@ module core_top(
     wire id_src2_is_imm20;
    // wire id_cancel;   //跳转的话，需要置�???????1
     wire id_br_taken;
+    wire id_br_taken_raw;
     wire id_br_taken_safe;
     wire [31:0]id_br_target;
     wire id_br_redirect;
-    assign id_br_taken_safe = id_br_taken && pipline_is_not_stalled;
-    assign id_br_redirect = id_br_taken_safe && (id_br_target != id_pc + 32'd4);
+    reg  id_br_sent;
+    reg [31:0] id_br_sent_pc;
+
+    assign id_br_taken_raw  = id_br_taken && pipline_is_not_stalled;
+    assign id_br_taken_safe = id_br_taken_raw && (!id_br_sent || id_pc != id_br_sent_pc);
+    assign id_br_redirect   = id_br_taken_safe && (id_br_target != id_pc + 32'd4);
+
+    always @(posedge clk) begin
+        if (rst || wb_ex || wb_is_ertn) begin
+            id_br_sent <= 1'b0;
+            id_br_sent_pc <= 32'b0;
+        end else if (!(if_ready_go===1'b0) && id_allow_in) begin
+            id_br_sent <= 1'b0;
+            id_br_sent_pc <= 32'b0;
+        end else if (id_br_taken_safe) begin
+            id_br_sent <= 1'b1;
+            id_br_sent_pc <= id_pc;
+        end
+    end
     wire id_src1_from_ref;
     wire id_src2_from_ref;
     wire id_zero_extend; //如果第二个操作数是立即数，�?�且�????要零扩展，是的话�????1，否则的话为0
@@ -1937,6 +1955,39 @@ module core_top(
     end
     // synthesis translate_on
 
+    // Coremark early exception-vector init / duplicate-commit trace.
+    // Keep this narrow so lab15/coremark logs remain readable.  The window
+    // covers the call into ex_base_init, pcaddu12i/addi/csrwr/jirl, and the
+    // following return path around 0x1c000104.
+    // synthesis translate_off
+    wire coremark_pcdbg_hit;
+    assign coremark_pcdbg_hit = ((if_pc   >= 32'h1c0000d0 && if_pc   <= 32'h1c000120) ||
+                                 (id_pc   >= 32'h1c0000d0 && id_pc   <= 32'h1c000120) ||
+                                 (exe1_pc >= 32'h1c0000d0 && exe1_pc <= 32'h1c000120) ||
+                                 (exe2_pc >= 32'h1c0000d0 && exe2_pc <= 32'h1c000120) ||
+                                 (mem_pc  >= 32'h1c0000d0 && mem_pc  <= 32'h1c000120) ||
+                                 (wb_pc   >= 32'h1c0000d0 && wb_pc   <= 32'h1c000120) ||
+                                 (pc_br_target >= 32'h1c0000d0 && pc_br_target <= 32'h1c000120));
+
+    always @(posedge clk) begin
+        if (!rst && coremark_pcdbg_hit) begin
+            $display("[CMPCDBG] t=%0t if_pc=%h if_inst=%h id_pc=%h id_inst=%h exe1_pc=%h exe1_inst=%h exe2_pc=%h exe2_inst=%h mem_pc=%h mem_inst=%h wb_pc=%h wb_inst=%h wb_valid=%b wb_cancel=%b",
+                     $time, if_pc, if_inst, id_pc, id_inst, exe1_pc, exe1_inst,
+                     exe2_pc, exe2_inst, mem_pc, mem_inst, wb_pc, wb_inst,
+                     wb_valid, wb_need_cancel);
+            $display("[CMPCDBG] t=%0t br=%b id_br=%b redirect=%b id_pc=%h target=%h br_need_cancel=%b br_delay=%h fall_cancel=%b id_cancel=%b raw_cancel=%b inst_req=%b req=%b addr_ok=%b data_ok=%b real_data_ok=%b if_rg=%b id_rg=%b exe1_rg=%b exe2_rg=%b mem_rg=%b if_allow=%b id_allow=%b exe1_allow=%b exe2_allow=%b mem_allow=%b",
+                     $time, pc_br_taken, id_br_taken, id_br_redirect, id_pc,
+                     pc_br_target, br_need_cancel, br_delay_slot_pc,
+                     br_cancel_fallthrough, id_inst_cancel, id_need_cancel_raw,
+                     inst_req_valid, inst_sram_req, inst_sram_addr_ok,
+                     inst_sram_data_ok, real_inst_data_ok, if_ready_go,
+                     id_ready_go, exe1_ready_go, exe2_ready_go, mem_ready_go,
+                     if_allow_in, id_allow_in, exe1_allow_in, exe2_allow_in,
+                     mem_allow_in);
+        end
+    end
+    // synthesis translate_on
+
     IF_readygo_state If_readygo_state(
         .rst(rst),
         .clk(clk),
@@ -2400,6 +2451,7 @@ module core_top(
     wire        wb_valid;
     wire        wb_is_load;
     wire        wb_is_store;
+    wire        wb_store_mmio;
     wire        wb_csr_rstat;
     wire        wb_is_tlbfill;
     wire [3:0]  wb_tlbfill_index;
@@ -2407,19 +2459,37 @@ module core_top(
     assign wb_valid        = (wb_pc != 32'h1bfffffc) && (wb_pc != 32'b0) && !wb_need_cancel;
     assign wb_is_load      = (wb_dram_we == 1'b0) && (wb_rdram_num != 2'b0 || wb_res_from_dram);
     assign wb_is_store     = (wb_dram_we == 1'b1);
+    assign wb_store_mmio   = wb_is_store && (wb_data_addr >= 32'hbfe0_0000) && (wb_data_addr <= 32'hbfff_ffff);
     assign wb_csr_rstat    = (wb_csr_we == 1'b0) && (wb_csr_num == 14'h5) && wb_valid;
     assign wb_is_tlbfill   = wb_tlb_fill_en && wb_valid;
     assign wb_tlbfill_index = csr_timer_64[3:0];
+
+    wire wb_store_dmw0_en;
+    wire wb_store_dmw1_en;
+    wire [31:0] wb_store_paddr;
+
+    assign wb_store_dmw0_en = (csr_crmd_da == 1'b0) && csr_crmd_pg &&
+                              ((csr_crmd_plv == 2'h3 && csr_dmw0_plv3) ||
+                               (csr_crmd_plv == 2'h0 && csr_dmw0_plv0)) &&
+                              (wb_data_addr[31:29] == csr_dmw0_vseg);
+    assign wb_store_dmw1_en = (csr_crmd_da == 1'b0) && csr_crmd_pg &&
+                              ((csr_crmd_plv == 2'h3 && csr_dmw1_plv3) ||
+                               (csr_crmd_plv == 2'h0 && csr_dmw1_plv0)) &&
+                              (wb_data_addr[31:29] == csr_dmw1_vseg);
+    assign wb_store_paddr   = (csr_crmd_da && !csr_crmd_pg) ? wb_data_addr :
+                              wb_store_dmw0_en              ? {csr_dmw0_pseg, wb_data_addr[28:0]} :
+                              wb_store_dmw1_en              ? {csr_dmw1_pseg, wb_data_addr[28:0]} :
+                                                               wb_data_addr;
 
     // cmt_* staging registers (1-cycle delay)
     reg         cmt_valid;
     reg         cmt_cnt_instr;
     reg [63:0]  cmt_stable_counter;
     reg         cmt_inst_ld_en;
-    reg         cmt_inst_st_en;
+    reg [7:0]   cmt_inst_st_en;
     reg [31:0]  cmt_memvis_paddr;
     reg [31:0]  cmt_memvis_vaddr;
-    reg [31:0]  cmt_memvis_data;
+    reg [63:0]  cmt_memvis_data;
     reg         cmt_csr_rstat_en;
     // cmt_csr_all removed: DifftestCSRRegState connects to wire csr_all_diff directly
     // to avoid NBA race with CSR register writes (wb_csr_we updates CSR at same posedge)
@@ -2453,14 +2523,19 @@ module core_top(
             cmt_cnt_instr       <= wb_res_from_cnt;
             cmt_stable_counter  <= csr_timer_64;
             cmt_inst_ld_en      <= wb_is_load;
-            cmt_inst_st_en      <= wb_is_store;
-            cmt_memvis_paddr    <= wb_data_addr;
+            cmt_inst_st_en      <= wb_is_store ? ((wb_wdram_num == 2'b00) ? 8'b0000_0100 :
+                                                   (wb_wdram_num == 2'b10) ? 8'b0000_0010 :
+                                                   (wb_wdram_num == 2'b01) ? 8'b0000_0001 :
+                                                                              8'b0000_0000) :
+                                                   8'b0000_0000;
+            cmt_memvis_paddr    <= wb_store_paddr;
             cmt_memvis_vaddr    <= wb_data_addr;
-            // Mask store data to actual size with correct byte lane alignment
-            // st.b: 1 byte at addr[1:0] lane; st.h: 2 bytes at addr[1] halfword
-            cmt_memvis_data     <= (wb_wdram_num == 2'b01) ? ({24'b0, wb_dram_wdata[7:0]} << (8 * wb_data_addr[1:0])) :
-                                   (wb_wdram_num == 2'b10) ? ({16'b0, wb_dram_wdata[15:0]} << (8 * {wb_data_addr[1], 1'b0})) :
-                                   wb_dram_wdata;
+            // StoreEvent uses the same lane-aligned word format as the legacy
+            // difftest store_commit path. MMIO stores are also reported, using
+            // translated paddr, so REF-side peripheral stores are consumed.
+            cmt_memvis_data     <= (wb_wdram_num == 2'b01) ? {32'b0, ({24'b0, wb_dram_wdata[7:0]} << (8 * wb_data_addr[1:0]))} :
+                                   (wb_wdram_num == 2'b10) ? {32'b0, ({16'b0, wb_dram_wdata[15:0]} << (8 * {wb_data_addr[1], 1'b0}))} :
+                                                             {32'b0, wb_dram_wdata};
             cmt_csr_rstat_en    <= wb_csr_rstat;
             cmt_wen             <= wb_rf_we;
             cmt_wdest           <= {3'd0, wb_rd};

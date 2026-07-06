@@ -22,21 +22,6 @@ module PC_Reg(
     reg [31:0]nextpc;
     assign inst_en = rst? 1'b0 : 1'b1;
 
-    reg [31:0]pc_target_memory;
-    reg pc_br_taken_memory;
-    always @(posedge clk)
-    begin
-        if(rst || wb_ex || wb_is_ertn)
-        begin
-            pc_target_memory <= 32'b0;
-            pc_br_taken_memory <= 1'b0;
-        end
-        else begin
-            pc_target_memory <= 32'b0;
-            pc_br_taken_memory <= 1'b0;
-        end
-    end
-
     assign inst_addr = nextpc;
 
     always @(posedge clk) begin
@@ -58,13 +43,9 @@ module PC_Reg(
     // R-delay makes if_allow_in stay 0 for many cycles; a one-cycle
     // pc_br_taken pulse would be missed, causing PC to advance past the
     // branch into invalid padding and raise spurious INE exceptions.
-    end else if (pc_br_taken && pipline_is_not_stalled && !pc_br_taken_memory) begin
+    end else if (pc_br_taken && pipline_is_not_stalled) begin
         if_pc <= nextpc;
         nextpc <= pc_br_target;
-        if_inst_tlb_ex <= inst_tlb_ex;
-    end else if (pc_br_taken_memory===1'b1) begin
-        if_pc <= nextpc;
-        nextpc <= (nextpc == pc_target_memory) ? nextpc + 32'd4 : pc_target_memory;
         if_inst_tlb_ex <= inst_tlb_ex;
     end else begin
         casez (!(pre_if_ready_go===1'b0)&&if_allow_in)
@@ -89,4 +70,20 @@ module PC_Reg(
         endcase
     end
 end
+
+// synthesis translate_off
+wire pc_dbg_hit;
+assign pc_dbg_hit = ((if_pc        >= 32'h1c0000d0 && if_pc        <= 32'h1c000120) ||
+                     (nextpc       >= 32'h1c0000d0 && nextpc       <= 32'h1c000120) ||
+                     (pc_br_target >= 32'h1c0000d0 && pc_br_target <= 32'h1c000120));
+
+always @(posedge clk) begin
+    if (!rst && pc_dbg_hit) begin
+        $display("[PCDBG] t=%0t if_pc=%h nextpc=%h br=%b br_target=%h pre_if_ready=%b if_allow=%b pipe_ok=%b wb_ex=%b ertn=%b inst_tlb_ex=%h",
+                 $time, if_pc, nextpc, pc_br_taken, pc_br_target,
+                 pre_if_ready_go, if_allow_in, pipline_is_not_stalled,
+                 wb_ex, wb_is_ertn, inst_tlb_ex);
+    end
+end
+// synthesis translate_on
 endmodule
