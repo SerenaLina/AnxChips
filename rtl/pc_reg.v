@@ -71,19 +71,4 @@ module PC_Reg(
     end
 end
 
-// synthesis translate_off
-wire pc_dbg_hit;
-assign pc_dbg_hit = ((if_pc        >= 32'h1c0000d0 && if_pc        <= 32'h1c000120) ||
-                     (nextpc       >= 32'h1c0000d0 && nextpc       <= 32'h1c000120) ||
-                     (pc_br_target >= 32'h1c0000d0 && pc_br_target <= 32'h1c000120));
-
-always @(posedge clk) begin
-    if (!rst && pc_dbg_hit) begin
-        $display("[PCDBG] t=%0t if_pc=%h nextpc=%h br=%b br_target=%h pre_if_ready=%b if_allow=%b pipe_ok=%b wb_ex=%b ertn=%b inst_tlb_ex=%h",
-                 $time, if_pc, nextpc, pc_br_taken, pc_br_target,
-                 pre_if_ready_go, if_allow_in, pipline_is_not_stalled,
-                 wb_ex, wb_is_ertn, inst_tlb_ex);
-    end
-end
-// synthesis translate_on
 endmodule

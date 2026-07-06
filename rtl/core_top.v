@@ -124,7 +124,10 @@ module core_top(
                                    (mem_inst[31:22] == 10'b0000011000) ||
                                    (wb_inst[31:22] == 10'b0000011000);
 
-    assign inst_sram_req= if_allow_in & inst_req_valid & pc_inst_en & (~pipline_is_not_stalled===1'b0) & (!(inst_tlb_or_csr_we === 1'b1) | pipeline_drained_except_if) & (!cache_op_in_pipeline | pipeline_drained_except_if);
+    wire inst_sram_req_pre;
+    wire if_suppress_dup_fetch_req;
+    assign inst_sram_req_pre = if_allow_in & inst_req_valid & pc_inst_en & (~pipline_is_not_stalled===1'b0) & (!(inst_tlb_or_csr_we === 1'b1) | pipeline_drained_except_if) & (!cache_op_in_pipeline | pipeline_drained_except_if);
+    assign inst_sram_req = inst_sram_req_pre & !if_suppress_dup_fetch_req;
 
     wire if_allow_in;
     wire id_allow_in;
@@ -295,19 +298,45 @@ module core_top(
         .id_int_esubcode(id_int_esubcode)
     );
     reg [31:0] inst_sram_rdata_safe;
+    reg [31:0] inst_sram_rdata_safe_pc;
     reg        inst_sram_rdata_safe_valid;
+    reg [31:0] inst_fetch_pc;
+    reg [31:0] if_last_sampled_pc;
+    reg        if_last_sampled_pc_valid;
     reg        br_need_cancel;
     reg [31:0] br_delay_slot_pc;
+
+    assign if_suppress_dup_fetch_req = if_last_sampled_pc_valid &&
+                                       (inst_sram_addr == if_last_sampled_pc) &&
+                                       !pc_br_taken && !wb_ex && !wb_is_ertn;
 
     always @(posedge clk) begin
         if (rst || wb_ex || wb_is_ertn) begin
             inst_sram_rdata_safe <= 32'h02800000;
+            inst_sram_rdata_safe_pc <= 32'b0;
             inst_sram_rdata_safe_valid <= 1'b0;
-        end else if (real_inst_data_ok) begin
-            inst_sram_rdata_safe <= inst_sram_rdata;
-            inst_sram_rdata_safe_valid <= 1'b1;
-        end else if (!(if_ready_go===1'b0) && id_allow_in) begin
-            inst_sram_rdata_safe_valid <= 1'b0;
+            inst_fetch_pc <= 32'b0;
+            if_last_sampled_pc <= 32'b0;
+            if_last_sampled_pc_valid <= 1'b0;
+        end else begin
+            if (inst_sram_req && inst_sram_addr_ok) begin
+                inst_fetch_pc <= inst_sram_addr;
+            end
+
+            if (!(if_ready_go===1'b0) && id_allow_in) begin
+                if_last_sampled_pc <= if_pc;
+                if_last_sampled_pc_valid <= 1'b1;
+            end else if (inst_sram_req && inst_sram_addr_ok && inst_sram_addr != if_last_sampled_pc) begin
+                if_last_sampled_pc_valid <= 1'b0;
+            end
+
+            if (real_inst_data_ok) begin
+                inst_sram_rdata_safe <= inst_sram_rdata;
+                inst_sram_rdata_safe_pc <= inst_fetch_pc;
+                inst_sram_rdata_safe_valid <= 1'b1;
+            end else if (!(if_ready_go===1'b0) && id_allow_in) begin
+                inst_sram_rdata_safe_valid <= 1'b0;
+            end
         end
     end
 
@@ -326,10 +355,13 @@ module core_top(
     wire br_cancel_fallthrough;
     assign br_cancel_fallthrough = br_need_cancel && (if_pc == br_delay_slot_pc);
 
+    wire inst_sram_rdata_pc_match;
+    assign inst_sram_rdata_pc_match = (inst_fetch_pc == if_pc);
+
     assign if_inst = rst ? 32'h02800000 :
                      (id_br_redirect || br_cancel_fallthrough) ? 32'h02800000 :
-                     real_inst_data_ok ? inst_sram_rdata :
-                     inst_sram_rdata_safe_valid ? inst_sram_rdata_safe : 32'h02800000;
+                     (real_inst_data_ok && inst_sram_rdata_pc_match) ? inst_sram_rdata :
+                     (inst_sram_rdata_safe_valid && inst_sram_rdata_safe_pc == if_pc) ? inst_sram_rdata_safe : 32'h02800000;
 
     // DEBUG: verify post-redirect fetch
     /* POST-EX debug removed */
@@ -1951,39 +1983,6 @@ module core_top(
                      $time, mem_pc, mem_inst, mem_data_addr, mem_dram_re, mem_dram_we, mem_need_data_sram, mem_ex_ale_h, mem_ex_ale_w, mem_ex_ale, mem_trap_pending, data_sram_data_ok, mem_data_tlb_ex, mem_need_cancel);
             $display("[N53_ALEDBG] t=%0t wb   pc=%h inst=%h data_addr=%h ale=%b adef=%b wb_ex=%b ecode=%h esub=%h ale_addr=%h csr_ex=%b cancel=%b inst_tlb=%h data_tlb=%h",
                      $time, wb_pc, wb_inst, wb_data_addr, wb_ex_ale, wb_ex_adef, wb_ex, wb_ecode, wb_esubcode, wb_ex_ale_addr, csr_ex, wb_need_cancel, wb_inst_tlb_ex, wb_data_tlb_ex);
-        end
-    end
-    // synthesis translate_on
-
-    // Coremark early exception-vector init / duplicate-commit trace.
-    // Keep this narrow so lab15/coremark logs remain readable.  The window
-    // covers the call into ex_base_init, pcaddu12i/addi/csrwr/jirl, and the
-    // following return path around 0x1c000104.
-    // synthesis translate_off
-    wire coremark_pcdbg_hit;
-    assign coremark_pcdbg_hit = ((if_pc   >= 32'h1c0000d0 && if_pc   <= 32'h1c000120) ||
-                                 (id_pc   >= 32'h1c0000d0 && id_pc   <= 32'h1c000120) ||
-                                 (exe1_pc >= 32'h1c0000d0 && exe1_pc <= 32'h1c000120) ||
-                                 (exe2_pc >= 32'h1c0000d0 && exe2_pc <= 32'h1c000120) ||
-                                 (mem_pc  >= 32'h1c0000d0 && mem_pc  <= 32'h1c000120) ||
-                                 (wb_pc   >= 32'h1c0000d0 && wb_pc   <= 32'h1c000120) ||
-                                 (pc_br_target >= 32'h1c0000d0 && pc_br_target <= 32'h1c000120));
-
-    always @(posedge clk) begin
-        if (!rst && coremark_pcdbg_hit) begin
-            $display("[CMPCDBG] t=%0t if_pc=%h if_inst=%h id_pc=%h id_inst=%h exe1_pc=%h exe1_inst=%h exe2_pc=%h exe2_inst=%h mem_pc=%h mem_inst=%h wb_pc=%h wb_inst=%h wb_valid=%b wb_cancel=%b",
-                     $time, if_pc, if_inst, id_pc, id_inst, exe1_pc, exe1_inst,
-                     exe2_pc, exe2_inst, mem_pc, mem_inst, wb_pc, wb_inst,
-                     wb_valid, wb_need_cancel);
-            $display("[CMPCDBG] t=%0t br=%b id_br=%b redirect=%b id_pc=%h target=%h br_need_cancel=%b br_delay=%h fall_cancel=%b id_cancel=%b raw_cancel=%b inst_req=%b req=%b addr_ok=%b data_ok=%b real_data_ok=%b if_rg=%b id_rg=%b exe1_rg=%b exe2_rg=%b mem_rg=%b if_allow=%b id_allow=%b exe1_allow=%b exe2_allow=%b mem_allow=%b",
-                     $time, pc_br_taken, id_br_taken, id_br_redirect, id_pc,
-                     pc_br_target, br_need_cancel, br_delay_slot_pc,
-                     br_cancel_fallthrough, id_inst_cancel, id_need_cancel_raw,
-                     inst_req_valid, inst_sram_req, inst_sram_addr_ok,
-                     inst_sram_data_ok, real_inst_data_ok, if_ready_go,
-                     id_ready_go, exe1_ready_go, exe2_ready_go, mem_ready_go,
-                     if_allow_in, id_allow_in, exe1_allow_in, exe2_allow_in,
-                     mem_allow_in);
         end
     end
     // synthesis translate_on
