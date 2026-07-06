@@ -28,17 +28,22 @@ module icache_two_way(
     input  wire        mem_data_ok,
     input  wire [31:0] mem_rdata
 );
-    localparam S_IDLE       = 3'd0;
-    localparam S_HIT_RESP   = 3'd1;
-    localparam S_UNC_REQ    = 3'd2;
-    localparam S_UNC_WAIT   = 3'd3;
-    localparam S_REF_REQ    = 3'd4;
-    localparam S_REF_WAIT   = 3'd5;
-    localparam S_REF_RESP   = 3'd6;
-    localparam S_CACOP_RESP = 3'd7;
+    localparam S_IDLE       = 4'd0;
+    localparam S_LOOKUP     = 4'd1;
+    localparam S_HIT_RESP   = 4'd2;
+    localparam S_UNC_REQ    = 4'd3;
+    localparam S_UNC_WAIT   = 4'd4;
+    localparam S_REF_REQ    = 4'd5;
+    localparam S_REF_WAIT   = 4'd6;
+    localparam S_REF_RESP   = 4'd7;
+    localparam S_CACOP_RESP = 4'd8;
 
-    reg [2:0] state;
-    reg [7:0] req_index;
+    localparam CACHE_INDEX_BITS = 8;
+    localparam CACHE_LINES      = 1 << CACHE_INDEX_BITS;
+    localparam CACHE_TAG_BITS   = 32 - 4 - CACHE_INDEX_BITS;
+
+    reg [3:0] state;
+    reg [CACHE_INDEX_BITS-1:0] req_index;
     reg [31:0] req_paddr;
     reg [1:0] req_word;
     reg req_uncached;
@@ -46,26 +51,33 @@ module icache_two_way(
     reg [1:0] refill_word;
     reg [127:0] refill_line;
     reg [31:0] resp_data;
+    reg lookup_cacop;
+    reg [1:0] req_cacop_code;
+    reg req_cacop_way;
+    reg [127:0] data0_r;
+    reg [127:0] data1_r;
 
-    reg valid0 [0:255];
-    reg valid1 [0:255];
-    reg [19:0] tag0 [0:255];
-    reg [19:0] tag1 [0:255];
-    reg [127:0] data0 [0:255];
-    reg [127:0] data1 [0:255];
-    reg used [0:255];
+    reg valid0 [0:CACHE_LINES-1];
+    reg valid1 [0:CACHE_LINES-1];
+    reg [CACHE_TAG_BITS-1:0] tag0 [0:CACHE_LINES-1];
+    reg [CACHE_TAG_BITS-1:0] tag1 [0:CACHE_LINES-1];
+    (* ram_style = "block" *) reg [127:0] data0 [0:CACHE_LINES-1];
+    (* ram_style = "block" *) reg [127:0] data1 [0:CACHE_LINES-1];
+    reg used [0:CACHE_LINES-1];
 
-    wire [19:0] fetch_tag = fetch_paddr[31:12];
-    wire fetch_hit0 = valid0[fetch_index] && tag0[fetch_index] == fetch_tag;
-    wire fetch_hit1 = valid1[fetch_index] && tag1[fetch_index] == fetch_tag;
+    wire [CACHE_INDEX_BITS-1:0] fetch_index_l = fetch_index[CACHE_INDEX_BITS-1:0];
+    wire [CACHE_INDEX_BITS-1:0] cacop_index_l = cacop_index[CACHE_INDEX_BITS-1:0];
+    wire [CACHE_TAG_BITS-1:0] fetch_tag = req_paddr[31:CACHE_INDEX_BITS+4];
+    wire fetch_hit0 = valid0[req_index] && tag0[req_index] == fetch_tag;
+    wire fetch_hit1 = valid1[req_index] && tag1[req_index] == fetch_tag;
     wire fetch_hit  = fetch_hit0 || fetch_hit1;
     wire fetch_hit_way = fetch_hit1;
-    wire fetch_replace_way = valid0[fetch_index] == 1'b0 ? 1'b0 :
-                             valid1[fetch_index] == 1'b0 ? 1'b1 : ~used[fetch_index];
+    wire fetch_replace_way = valid0[req_index] == 1'b0 ? 1'b0 :
+                             valid1[req_index] == 1'b0 ? 1'b1 : ~used[req_index];
 
-    wire [19:0] cacop_tag = cacop_paddr[31:12];
-    wire cacop_hit0 = valid0[cacop_index] && tag0[cacop_index] == cacop_tag;
-    wire cacop_hit1 = valid1[cacop_index] && tag1[cacop_index] == cacop_tag;
+    wire [CACHE_TAG_BITS-1:0] cacop_tag = req_paddr[31:CACHE_INDEX_BITS+4];
+    wire cacop_hit0 = valid0[req_index] && tag0[req_index] == cacop_tag;
+    wire cacop_hit1 = valid1[req_index] && tag1[req_index] == cacop_tag;
 
     function [31:0] select_word;
         input [127:0] line;
@@ -112,7 +124,7 @@ module icache_two_way(
     always @(posedge clk) begin
         if (!resetn) begin
             state <= S_IDLE;
-            req_index <= 8'b0;
+            req_index <= {CACHE_INDEX_BITS{1'b0}};
             req_paddr <= 32'b0;
             req_word <= 2'b0;
             req_uncached <= 1'b0;
@@ -120,51 +132,78 @@ module icache_two_way(
             refill_word <= 2'b0;
             refill_line <= 128'b0;
             resp_data <= 32'b0;
-            for (i = 0; i < 256; i = i + 1) begin
+            lookup_cacop <= 1'b0;
+            req_cacop_code <= 2'b0;
+            req_cacop_way <= 1'b0;
+            data0_r <= 128'b0;
+            data1_r <= 128'b0;
+            for (i = 0; i < CACHE_LINES; i = i + 1) begin
                 valid0[i] = 1'b0;
                 valid1[i] = 1'b0;
-                tag0[i] = 20'b0;
-                tag1[i] = 20'b0;
-                data0[i] = 128'b0;
-                data1[i] = 128'b0;
+                tag0[i] = {CACHE_TAG_BITS{1'b0}};
+                tag1[i] = {CACHE_TAG_BITS{1'b0}};
                 used[i] = 1'b0;
             end
         end else begin
             case (state)
                 S_IDLE: begin
                     if (cacop_req) begin
-                        if (cacop_code == 2'b10) begin
-                            if (cacop_hit0) begin
-                                valid0[cacop_index] <= 1'b0;
-                            end
-                            if (cacop_hit1) begin
-                                valid1[cacop_index] <= 1'b0;
-                            end
-                        end else begin
-                            if (cacop_way == 1'b0) begin
-                                valid0[cacop_index] <= 1'b0;
-                            end else begin
-                                valid1[cacop_index] <= 1'b0;
-                            end
-                        end
-                        state <= S_CACOP_RESP;
+                        req_index <= cacop_index_l;
+                        req_paddr <= cacop_paddr;
+                        req_word <= cacop_paddr[3:2];
+                        req_uncached <= 1'b0;
+                        req_replace_way <= cacop_way;
+                        refill_word <= 2'b0;
+                        refill_line <= 128'b0;
+                        lookup_cacop <= 1'b1;
+                        req_cacop_code <= cacop_code;
+                        req_cacop_way <= cacop_way;
+                        data0_r <= data0[cacop_index_l];
+                        data1_r <= data1[cacop_index_l];
+                        state <= S_LOOKUP;
                     end else if (fetch_req) begin
-                        req_index <= fetch_index;
+                        req_index <= fetch_index_l;
                         req_paddr <= fetch_paddr;
                         req_word <= fetch_paddr[3:2];
                         req_uncached <= fetch_uncached;
-                        req_replace_way <= fetch_replace_way;
                         refill_word <= 2'b0;
                         refill_line <= 128'b0;
+                        lookup_cacop <= 1'b0;
+                        req_cacop_code <= 2'b0;
+                        req_cacop_way <= 1'b0;
+                        data0_r <= data0[fetch_index_l];
+                        data1_r <= data1[fetch_index_l];
                         if (fetch_uncached) begin
                             state <= S_UNC_REQ;
-                        end else if (fetch_hit) begin
-                            resp_data <= select_word(fetch_hit_way ? data1[fetch_index] : data0[fetch_index], fetch_paddr[3:2]);
-                            used[fetch_index] <= fetch_hit_way;
-                            state <= S_HIT_RESP;
                         end else begin
-                            state <= S_REF_REQ;
+                            state <= S_LOOKUP;
                         end
+                    end
+                end
+                S_LOOKUP: begin
+                    if (lookup_cacop) begin
+                        if (req_cacop_code == 2'b10) begin
+                            if (cacop_hit0) begin
+                                valid0[req_index] <= 1'b0;
+                            end
+                            if (cacop_hit1) begin
+                                valid1[req_index] <= 1'b0;
+                            end
+                        end else begin
+                            if (req_cacop_way == 1'b0) begin
+                                valid0[req_index] <= 1'b0;
+                            end else begin
+                                valid1[req_index] <= 1'b0;
+                            end
+                        end
+                        state <= S_CACOP_RESP;
+                    end else if (fetch_hit) begin
+                        resp_data <= select_word(fetch_hit_way ? data1_r : data0_r, req_word);
+                        used[req_index] <= fetch_hit_way;
+                        state <= S_HIT_RESP;
+                    end else begin
+                        req_replace_way <= fetch_replace_way;
+                        state <= S_REF_REQ;
                     end
                 end
                 S_HIT_RESP: begin
@@ -193,11 +232,11 @@ module icache_two_way(
                             resp_data <= select_word(put_word(refill_line, refill_word, mem_rdata), req_word);
                             if (req_replace_way == 1'b0) begin
                                 data0[req_index] <= put_word(refill_line, refill_word, mem_rdata);
-                                tag0[req_index] <= req_paddr[31:12];
+                                tag0[req_index] <= req_paddr[31:CACHE_INDEX_BITS+4];
                                 valid0[req_index] <= 1'b1;
                             end else begin
                                 data1[req_index] <= put_word(refill_line, refill_word, mem_rdata);
-                                tag1[req_index] <= req_paddr[31:12];
+                                tag1[req_index] <= req_paddr[31:CACHE_INDEX_BITS+4];
                                 valid1[req_index] <= 1'b1;
                             end
                             used[req_index] <= req_replace_way;
