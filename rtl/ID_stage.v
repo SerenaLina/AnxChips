@@ -66,7 +66,6 @@ module ID_stage(
     output wire        id_is_ld,
     output wire        id_is_st,
     output wire        id_tlb_or_csr_we
-   
 );
 
 
@@ -165,6 +164,13 @@ module ID_stage(
     wire        inst_invtlb;   // TLB无效化指�?
     wire        inst_cpucfg;   // CPUCFG指令
     wire        inst_cacop;    // Cache操作指令
+    // 原子访存与屏障指令
+    wire        inst_ll_w;     // 载入链接 ll.w
+    wire        inst_sc_w;     // 条件存储 sc.w
+    wire        inst_dbar;     // 数据屏障 dbar（本单发射顺序核视为 NOP）
+    wire        inst_ibar;     // 指令屏障 ibar（本单发射顺序核视为 NOP）
+    wire        inst_preld;    // 预取 preld（本核视为 NOP）
+    wire        inst_idle;     // idle：等待中断唤醒
 
 
     // 指令字段提取
@@ -274,6 +280,17 @@ module ID_stage(
     assign inst_invtlb  = op_31_26_d[6'h01] & op_25_22_d[4'h9] & op_21_20_d[2'h0] & op_19_15_d[5'h13]; // invtlb
     assign inst_cacop   = op_31_26_d[6'h01] & op_25_22_d[4'h8]; // cacop
 
+    // 原子访存与屏障指令解码
+    // ll.w:  op[31:26]=0x08, inst[25:24]=00
+    // sc.w:  op[31:26]=0x08, inst[25:24]=01
+    assign inst_ll_w    = op_31_26_d[6'h08] & op_25_24_d[2'h0];
+    assign inst_sc_w    = op_31_26_d[6'h08] & op_25_24_d[2'h1];
+    // dbar: inst[31:15]=0x70E4 ; ibar: inst[31:15]=0x70E5 （hint 位不参与译码，按 NOP 处理）
+    assign inst_dbar    = (id_inst[31:15] == 17'h70E4);
+    assign inst_ibar    = (id_inst[31:15] == 17'h70E5);
+    assign inst_preld   = op_31_26_d[6'h0a] & op_25_22_d[4'hb];   // preld
+    assign inst_idle    = (id_inst[31:15] == 17'h0C91);          // idle
+
     
 
 
@@ -325,12 +342,14 @@ assign id_alu_op =
                     // 新增指令
                     inst_rdcntvl_w | inst_rdcntvh_w | inst_rdcntid |
                     inst_cpucfg |
-                    inst_csrrd | inst_csrwr | inst_csrxchg) && id_ex_adef!=1'b1 ;
+                    inst_csrrd | inst_csrwr | inst_csrxchg |
+                    // 原子访存：ll.w 写回载入值，sc.w 写回成功标志
+                    inst_ll_w | inst_sc_w) && id_ex_adef!=1'b1 ;
 
-    // 存储器访问控制（保持不变�?
-    assign id_dram_we = (inst_st_w | inst_st_b | inst_st_h)&&id_ex_adef!=1'b1;
-    assign id_dram_re = inst_ld_w | inst_ld_b | inst_ld_h | inst_ld_bu | inst_ld_hu;
-    assign id_res_from_dram = inst_ld_w | inst_ld_b | inst_ld_h | inst_ld_bu | inst_ld_hu;
+    // 存储器访问控制（sc.w 复用 store 通路，实际写使能在 EXE2 由 LLbit 门控�?
+    assign id_dram_we = (inst_st_w | inst_st_b | inst_st_h | inst_sc_w)&&id_ex_adef!=1'b1;
+    assign id_dram_re = inst_ld_w | inst_ld_b | inst_ld_h | inst_ld_bu | inst_ld_hu | inst_ll_w;
+    assign id_res_from_dram = inst_ld_w | inst_ld_b | inst_ld_h | inst_ld_bu | inst_ld_hu | inst_ll_w;
     // 新增结果来源选择
     assign id_res_from_csr = inst_csrrd | inst_csrwr | inst_csrxchg;
     assign id_res_from_cnt = inst_rdcntvl_w | inst_rdcntvh_w | inst_cpucfg;
@@ -350,8 +369,8 @@ assign id_alu_op =
     assign id_csr_mask_all_one = ~inst_csrxchg; // csrxchg�?0，其他CSR操作�?1
    
 
-    assign id_src2_is_rd = inst_beq | inst_bne | inst_st_w | inst_st_b | inst_st_h | 
-                     inst_blt | inst_bge | inst_bltu | inst_bgeu | inst_csrwr | inst_csrxchg ;
+    assign id_src2_is_rd = inst_beq | inst_bne | inst_st_w | inst_st_b | inst_st_h |
+                     inst_blt | inst_bge | inst_bltu | inst_bgeu | inst_csrwr | inst_csrxchg | inst_sc_w ;
 
 
     // 偏移量计�?
@@ -396,17 +415,19 @@ assign id_alu_op =
                         inst_csrxchg |
                         inst_cpucfg |
                         inst_invtlb |
-                        inst_cacop;  // �?要读取rj寄存�?
+                        inst_cacop |
+                        inst_ll_w | inst_sc_w;  // ll.w/sc.w 以 rj 为基址
 
     assign id_src2_from_ref = inst_add_w | inst_sub_w | inst_lu12i_w | inst_slt | inst_sltu |
-                        inst_or | inst_nor | inst_and | inst_xor | inst_beq | inst_bne | 
+                        inst_or | inst_nor | inst_and | inst_xor | inst_beq | inst_bne |
                         inst_lu12i_w | inst_st_w | inst_ld_w |
                         inst_sll | inst_srl | inst_sra |
                         inst_mul_w | inst_mulh_w | inst_mulh_wu | inst_div_w | inst_mod_w |
                         inst_div_wu | inst_mod_wu |
                         inst_blt | inst_bge | inst_bltu | inst_bgeu |
                         inst_st_b | inst_st_h | inst_csrwr | inst_csrxchg |
-                        inst_invtlb;
+                        inst_invtlb |
+                        inst_sc_w;  // sc.w 的存储数据来自 rd（经 id_src2_is_rd 选择）
                 
 
     // 立即数零扩展指令
@@ -417,20 +438,20 @@ assign id_alu_op =
     assign id_rdram_need_signed_extend = inst_ld_b | inst_ld_h;
     
     // load/store指令类型编码
-    assign id_rdram_num = inst_ld_w ? 2'b00 : 
+    assign id_rdram_num = (inst_ld_w | inst_ll_w | inst_sc_w) ? 2'b00 :
                          (inst_ld_b | inst_ld_bu) ? 2'b10 :
-                         (inst_ld_h | inst_ld_hu) ? 2'b01 :  
+                         (inst_ld_h | inst_ld_hu) ? 2'b01 :
                          2'b11; //其他情况
-    assign id_wdram_num = inst_st_w ? 2'b00 : 
+    assign id_wdram_num = (inst_st_w | inst_sc_w) ? 2'b00 :
                          (inst_st_b ) ? 2'b01 :
-                         (inst_st_h ) ? 2'b10 :  
+                         (inst_st_h ) ? 2'b10 :
                          2'b11; //其他情况
 
     assign id_ex_adef = (id_pc[1:0] != 2'b00);
     // 半字地址不对齐异常（�?低位不为0�?
     assign id_ex_ale_h = (inst_ld_h | inst_ld_hu | inst_st_h) ;
-    // 字地�?不对齐异常（�?低两位不�?00�? 
-    assign id_ex_ale_w = (inst_ld_w | inst_st_w);
+    // 字地�?不对齐异常（�?低两位不�?00�?
+    assign id_ex_ale_w = (inst_ld_w | inst_st_w | inst_ll_w | inst_sc_w);
     assign id_ex_brk = inst_break;// 异常�?测信�?
     assign id_ex_ine = ~(
     // 基本算术逻辑指令
@@ -463,10 +484,14 @@ assign id_alu_op =
     inst_syscall | inst_break|
     // TLB/cache指令
     inst_tlbsrch | inst_tlbrd | inst_tlbwr | inst_tlbfill | (inst_invtlb && id_invtlb_op <5'h7) |
-    inst_cacop
+    inst_cacop |
+    // 原子访存与屏�?
+    inst_ll_w | inst_sc_w | inst_dbar | inst_ibar |
+    // 预取与等待
+    inst_preld | inst_idle
     )&&(id_pc!=32'h1bfffffc) ; // 1bfffffc为非法指令地�?
     assign id_has_int = int_has_int; // 直接传递来自interrupt.v的中断标记
-    assign id_need_data_sram = inst_st_b | inst_st_h | inst_ld_b | inst_ld_bu | inst_ld_h | inst_ld_hu | inst_ld_w | inst_st_w; 
+    assign id_need_data_sram = inst_st_b | inst_st_h | inst_ld_b | inst_ld_bu | inst_ld_h | inst_ld_hu | inst_ld_w | inst_st_w | inst_ll_w | inst_sc_w;
 
 
     // TLB相关信号
@@ -480,8 +505,8 @@ assign id_alu_op =
     assign id_tlb_wr_en = inst_tlbwr;
     assign id_tlb_fill_en = inst_tlbfill;
 
-    assign id_is_ld = inst_ld_b | inst_ld_bu | inst_ld_h | inst_ld_hu | inst_ld_w ;
-    assign id_is_st = inst_st_b | inst_st_h  | inst_st_w;
+    assign id_is_ld = inst_ld_b | inst_ld_bu | inst_ld_h | inst_ld_hu | inst_ld_w | inst_ll_w ;
+    assign id_is_st = inst_st_b | inst_st_h  | inst_st_w | inst_sc_w;
 
     assign id_tlb_or_csr_we = inst_csrwr | inst_csrxchg | inst_tlbwr | inst_tlbfill | inst_invtlb | inst_tlbsrch ;
 

@@ -421,10 +421,8 @@ module tlb
     // INVTLB 指令相关的操作
     always @(posedge clk)
     begin
-        // DEBUG every cycle
-        if ($time > 1225500 && $time < 1228300)
-            $display("[TLB-E-ALL] %0t: rst=%b we=%b invtlb_valid=%b invtlb_op=%d tlb_e=%b",
-                $time, rst, we, invtlb_valid, invtlb_op, tlb_e);
+        // TLB empty/all-zero is a legal state before refill; avoid flooding logs.
+        // Keep only reset/write/invalidate event traces below.
         if(rst)
         begin
             tlb_e <= {TLBNUM{1'b0}};

@@ -541,7 +541,12 @@ module core_top(
     assign id_dram_wdata=id_src2;
     // ERTN behaves like a branch in ID: redirect PC to ERA immediately,
     // preventing PC+8 from being fetched. Delay slot (already in IF) still executes.
-    assign pc_br_taken=id_br_taken_safe|(id_is_ertn==1'b1)|btb_mispredict;
+    // pc_br_taken must exclude branches/jumps whose target == id_pc+4 (the
+    // sequential next PC): taking them would reload nextpc<=target and collapse
+    // the "nextpc == if_pc+4" invariant, which the dup-fetch-suppress logic
+    // relies on.  A jump-to-next (e.g. kernel_entry's jirl to PC+4) must advance
+    // PC sequentially, exactly as id_br_redirect already handles it.
+    assign pc_br_taken=(id_br_taken_safe && (id_br_target != id_pc + 32'd4))|(id_is_ertn==1'b1)|btb_mispredict;
     assign pc_br_target =    btb_mispredict ? (id_pc + 32'd4) :
                             (wb_is_ertn===1'b1 || id_is_ertn===1'b1)  ?   csr_era_pc  :
                             (csr_data_tlb_refill || csr_inst_tlb_refill) ? {csr_tlbrentry, 6'b0}  :
@@ -856,8 +861,15 @@ module core_top(
     wire [31:0] exe1_alu_ret;
 
 
+    // ll.w/sc.w：地址 = rj + SignExt(si14)<<2（si14 = inst[23:10]），直接从 exe1_inst 译码，
+    // 避免为一条罕见指令改动全部流水线寄存器。sc.w 的 exe1_src2 承载存储数据(rd)，故此处优先覆盖。
+    wire        exe1_is_ll_sc = (exe1_inst[31:26] == 6'h08);
+    wire [13:0] exe1_si14     = exe1_inst[23:10];
+    wire [31:0] exe1_llsc_off = {{16{exe1_si14[13]}}, exe1_si14, 2'b00};
+
     assign alu_src1=exe1_src1;
-    assign alu_src2 = exe1_src2_is_imm12  ?  exe1_zero_extend?     {20'b0,exe1_imm12} :{{20{exe1_imm12[11]}}, exe1_imm12} :
+    assign alu_src2 = exe1_is_ll_sc      ?  exe1_llsc_off :
+                  exe1_src2_is_imm12  ?  exe1_zero_extend?     {20'b0,exe1_imm12} :{{20{exe1_imm12[11]}}, exe1_imm12} :
                   exe1_src2_is_imm5   ? {{27{exe1_imm5[4]}}, exe1_imm5} :
                   exe1_src2_is_imm26  ?  {{4{exe1_imm26_extend[27]}}, exe1_imm26_extend}:
                   exe1_src2_is_imm16  ?  {{14{exe1_imm16_extend[17]}}, exe1_imm16_extend} :
@@ -1124,7 +1136,7 @@ module core_top(
         .exe2_alu_result(exe2_alu_result),
         .exe2_ref_we(exe2_ref_we),
         .exe2_dram_re(exe2_dram_re),
-        .exe2_dram_we(exe2_dram_we),
+        .exe2_dram_we(exe2_dram_we_eff),   // sc.w 失败时置0：不产生 StoreEvent、rd写0
         .exe2_data_addr(exe2_data_addr),
         .exe2_inst(exe2_inst),
         .exe2_rd(exe2_rd),
@@ -1157,7 +1169,7 @@ module core_top(
         .exe2_res_is_rj(exe2_res_is_rj),
         .exe2_res_from_cnt(exe2_res_from_cnt),
         .exe2_res_from_tid(exe2_res_from_tid),
-        .exe2_need_data_sram(exe2_need_data_sram),
+        .exe2_need_data_sram(exe2_need_data_sram_eff),  // sc.w 失败：不占用访存握手
         .exe2_ex_ale_h(exe2_ex_ale_h),
         .exe2_ex_ale_w(exe2_ex_ale_w),
         .exe2_need_cancel(exe2_need_cancel),
@@ -1274,28 +1286,90 @@ module core_top(
                              exe2_ex_ale || exe2_is_syscall ||
                              (exe2_inst_tlb_ex != 2'b0) || (data_tlb_ex != 3'b0));
 
+    // ---- 原子 sc.w 条件存储门控（含 ll→sc 前推）----
+    // sc.w 是否成功取决于 LLbit。相邻 ll.w 可能尚在 MEM/WB 未提交 LLbit，
+    // 故对处于 MEM/WB 的有效 ll.w 做前推，等效 LLbit=1。
+    wire exe2_is_sc_w = (exe2_inst[31:24] == 8'h21);
+    wire mem_is_ll_w  = (mem_inst[31:24]  == 8'h20) && !mem_need_cancel;
+    wire wb_is_ll_w   = (wb_inst[31:24]   == 8'h20) && !wb_need_cancel;
+
+    // ---- IPE：特权指令在 PLV!=0（用户态）下执行触发指令特权等级错例外 ----
+    // 特权指令类（由已透传的 wb_inst 现场译码，避免改动流水线寄存器模块）：
+    //   csrrd/csrwr/csrxchg (inst[31:24]==0x04)、cacop (inst[31:22]==0x018)、
+    //   idle (inst[31:15]==0x0C91)、tlbsrch/tlbrd/tlbwr/tlbfill/ertn (op1/0x9/0/0x10)、
+    //   invtlb (op1/0x9/0/0x13)
+    // 注意：Hit 类 cacop（code[4:3]==2'b10，命中失效/命中写回）允许任意特权级执行，
+    //       仅 Store Tag / Index 类（code[4:3]==00/01）需 PLV0，故对 cacop 加 code[4:3]!=10 门控。
+    wire wb_priv_inst = (wb_inst[31:24] == 8'h04)
+                      | ((wb_inst[31:22] == 10'h018) & (wb_inst[4:3] != 2'b10))
+                      | (wb_inst[31:15] == 17'h0C91)
+                      | (wb_inst[31:26]==6'h01 & wb_inst[25:22]==4'h9 & wb_inst[21:20]==2'h0
+                         & (wb_inst[19:15]==5'h10 | wb_inst[19:15]==5'h13));
+    wire wb_ex_ipe = wb_priv_inst & (csr_crmd_plv == 2'h3) & !wb_need_cancel;
+    // ertn 在用户态触发 IPE 时，不得再按正常 ertn 处理（改走异常入口）
+    wire wb_is_ertn = wb_is_ertn_raw & ~wb_ex_ipe;
+
+    // 任何对 TVAL(0x42) 的 CSR 访问（csrrd/csrwr/csrxchg）都读回定时器当前值：
+    // csrrd 写入 rd，csrwr/csrxchg 把旧 tval 读入 rd。定时器无法被 NEMU 周期精确
+    // 建模，故标记为 CNT 型指令，令 difftest 通过 timercpy 把 DUT 的 tval 同步进
+    // NEMU（与 rdcntv 处理一致），使 rd 结果一致。TVAL 为只读，写操作被忽略。
+    wire wb_is_csrrd_tval = (wb_inst[31:24] == 8'h04)   // csr 指令
+                          & (wb_inst[23:10] == 14'h42); // csr_num == TVAL
+
+    // ---- IDLE 等待中断 FSM ----
+    // 执行 IDLE 后处理器核停止取指进入等待状态，直到被 ECFG 使能的中断唤醒；
+    // 被唤醒后在 IDLE 之后的那条指令（era=idle+4）处响应中断。
+    //  * idle 正常提交一次（this_pc=idle），difftest 据此关闭死时钟看门狗。
+    //  * 提交后 wb_allow_in=0 回压上游、停止取指，令流水线停顿（NEMU 亦停在 idle）。
+    //  * idle+4 在提交 idle 时已被清空（不在流水线中），故不能靠“停在 WB”获得 era；
+    //    改为提交 idle 当拍捕获 idle_pc+4，唤醒时注入 CSR.ERA 并向 difftest 报告中断。
+    wire wb_is_idle_commit = wb_valid & (wb_inst[31:15]==17'h0C91) & ~wb_ex & ~wb_need_cancel;
+    wire idle_int_pending  = |(csr_estat_is & csr_ecfg_lie);   // ECFG 使能的中断挂起
+    reg  idle_wait_r;
+    reg  [31:0] idle_era_r;   // 捕获 idle+4，唤醒时作为 era
+    always @(posedge clk) begin
+        if (rst)                    idle_wait_r <= 1'b0;
+        else if (idle_int_pending)  idle_wait_r <= 1'b0;   // 被中断唤醒，退出等待
+        else if (wb_ex)             idle_wait_r <= 1'b0;   // 异常冲刷，退出等待
+        else if (wb_is_idle_commit) idle_wait_r <= 1'b1;   // idle 提交，进入等待
+    end
+    always @(posedge clk) begin
+        if (rst)                    idle_era_r <= 32'b0;
+        else if (wb_is_idle_commit) idle_era_r <= wb_pc + 32'd4;   // idle 提交拍：wb_pc=idle_pc
+    end
+    wire idle_freeze = idle_wait_r & ~idle_int_pending;    // 冻结流水线（回压上游、停取指）
+    wire idle_wake   = idle_wait_r &  idle_int_pending;    // 唤醒当拍：注入中断 + era=idle+4
+    // 唤醒当拍供 CSR 保存的 era（idle+4），非唤醒时透传正常 wb_pc
+    wire [31:0] csr_wb_pc_eff = idle_wake ? idle_era_r : wb_pc;
+
+    wire sc_llbit_eff = csr_llbit | mem_is_ll_w | wb_is_ll_w;
+    wire sc_w_success = exe2_is_sc_w & sc_llbit_eff;
+    // 失败的 sc.w：不发起访存、不写内存；成功则走正常 store 通路
+    wire exe2_dram_we_eff        = exe2_is_sc_w ? sc_w_success : exe2_dram_we;
+    wire exe2_need_data_sram_eff = exe2_is_sc_w ? sc_w_success : exe2_need_data_sram;
+
     assign data_sram_wstrb=(wb_ex===1'b1 || wb_is_ertn===1'b1 || mem_trap_pending || exe2_self_trap)?    4'b0000:
-                        (exe2_dram_we&&exe2_wdram_num==0)? 4'b1111:
-                        (exe2_dram_we&&exe2_wdram_num==1&&data_sram_addr[1:0]==2'b00)?  4'b0001:
-                        (exe2_dram_we&&exe2_wdram_num==1&&data_sram_addr[1:0]==2'b01)?4'b0010:
-                        (exe2_dram_we&&exe2_wdram_num==1&&data_sram_addr[1:0]==2'b10)? 4'b0100:
-                        (exe2_dram_we&&exe2_wdram_num==1&&data_sram_addr[1:0]==2'b11)? 4'b1000:
-                        (exe2_dram_we&&exe2_wdram_num==2&&data_sram_addr[1:0]==2'b00)?4'b0011:
-                        (exe2_dram_we&&exe2_wdram_num==2&&data_sram_addr[1:0]==2'b01)?4'b0110:
-                        (exe2_dram_we&&exe2_wdram_num==2&&data_sram_addr[1:0]==2'b10)?4'b1100:   4'b0000;
+                        (exe2_dram_we_eff&&exe2_wdram_num==0)? 4'b1111:
+                        (exe2_dram_we_eff&&exe2_wdram_num==1&&data_sram_addr[1:0]==2'b00)?  4'b0001:
+                        (exe2_dram_we_eff&&exe2_wdram_num==1&&data_sram_addr[1:0]==2'b01)?4'b0010:
+                        (exe2_dram_we_eff&&exe2_wdram_num==1&&data_sram_addr[1:0]==2'b10)? 4'b0100:
+                        (exe2_dram_we_eff&&exe2_wdram_num==1&&data_sram_addr[1:0]==2'b11)? 4'b1000:
+                        (exe2_dram_we_eff&&exe2_wdram_num==2&&data_sram_addr[1:0]==2'b00)?4'b0011:
+                        (exe2_dram_we_eff&&exe2_wdram_num==2&&data_sram_addr[1:0]==2'b01)?4'b0110:
+                        (exe2_dram_we_eff&&exe2_wdram_num==2&&data_sram_addr[1:0]==2'b10)?4'b1100:   4'b0000;
 
     wire normal_data_sram_req;
     wire cacheop_req;
     wire data_side_effect_block;
     assign data_side_effect_block = (wb_ex===1'b1) || (wb_is_ertn===1'b1) || mem_trap_pending || exe2_self_trap;
-    assign normal_data_sram_req = data_req_valid & exe2_need_data_sram & mem_allow_in && !data_side_effect_block & (!(data_tlb_or_csr_we === 1'b1));
+    assign normal_data_sram_req = data_req_valid & exe2_need_data_sram_eff & mem_allow_in && !data_side_effect_block & (!(data_tlb_or_csr_we === 1'b1));
     assign cacheop_req = data_req_valid & exe2_is_cacop & mem_allow_in && !data_side_effect_block & (!(data_tlb_or_csr_we === 1'b1));
     assign data_sram_req= normal_data_sram_req | cacheop_req;
     assign data_sram_size = exe2_ex_ale_h ? 2'b1 :
                             exe2_ex_ale_w ? 2'b10 :  2'b0;
-    assign exe2_addr_shake_ok = (exe2_need_data_sram || exe2_is_cacop) ?  (data_sram_req&&(data_sram_addr_ok===1'b1) || exe2_self_trap) :  1'b1;
+    assign exe2_addr_shake_ok = (exe2_need_data_sram_eff || exe2_is_cacop) ?  (data_sram_req&&(data_sram_addr_ok===1'b1) || exe2_self_trap) :  1'b1;
     assign mem_data_shake_ok = (mem_need_data_sram || mem_is_cacop) ?  (data_sram_data_ok===1'b1 || mem_data_tlb_ex!=3'b0 || mem_trap_pending) : 1'b1;
-    assign data_sram_wr = exe2_dram_we;
+    assign data_sram_wr = exe2_dram_we_eff;
     assign mem_need_and_data_ok = mem_need_data_sram && (data_sram_data_ok===1'b1);
    // assign data_sram_en=1'b1;
     //assign data_sram_wdata=mem_dram_wdata;
@@ -1310,7 +1384,7 @@ module core_top(
     wire data_dmw1_en;
     wire [2:0]data_tlb_ex;
 
-    assign data_tlb_ex = ((csr_crmd_da && csr_crmd_pg==1'b0)|| data_dmw0_en || data_dmw1_en || (exe2_need_data_sram==1'b0 && exe2_cacop_op2==1'b0)) ? 3'h0 :
+    assign data_tlb_ex = ((csr_crmd_da && csr_crmd_pg==1'b0)|| data_dmw0_en || data_dmw1_en || (exe2_need_data_sram_eff==1'b0 && exe2_cacop_op2==1'b0)) ? 3'h0 :
                          (tlb_s1_found == 1'b0)                                              ? 3'h1 :
                          (tlb_s1_v == 1'b0 && (exe2_is_ld || exe2_cacop_op2))              ? 3'h2 :
                          (tlb_s1_v == 1'b0 && exe2_is_st)                                     ? 3'h3 :
@@ -1350,7 +1424,7 @@ module core_top(
     wire [31:0] wb_data_addr;
     wire [13:0] wb_csr_num;
     wire wb_csr_we;
-    wire wb_is_ertn;
+    wire wb_is_ertn_raw;
     wire wb_is_syscall;
     wire wb_res_from_csr;
     wire [31:0] csr_rvalue;
@@ -1365,17 +1439,25 @@ module core_top(
     wire [7:0] wb_int_esubcode;
     wire wb_res_from_tid;
     wire wb_need_cancel;
-    wire wb_inst_tlbrd;
+    wire wb_inst_tlbrd_raw;
     wire [4:0] wb_rj;
     wire [31:0] wb_res_of_cnt;
-    wire wb_inst_tlbsrch;
-    wire wb_tlb_we;
-    wire wb_tlb_fill_en;
-    wire wb_tlb_wr_en;
-    wire wb_invtlb_valid;
+    wire wb_inst_tlbsrch_raw;
+    wire wb_tlb_we_raw;
+    wire wb_tlb_fill_en_raw;
+    wire wb_tlb_wr_en_raw;
+    wire wb_invtlb_valid_raw;
     wire [4:0]wb_invtlb_op;
     wire [9:0]wb_invtlb_asid;
     wire [18:0]wb_invtlb_va;
+    // 异常发生时（如 IPE 落在 TLB 指令上）压制其对 TLB/CSR 的副作用。
+    // wb_ex 在下方声明（net 模块作用域，可前向引用）。
+    wire wb_inst_tlbrd   = wb_inst_tlbrd_raw   & ~wb_ex;
+    wire wb_inst_tlbsrch = wb_inst_tlbsrch_raw & ~wb_ex;
+    wire wb_tlb_we       = wb_tlb_we_raw       & ~wb_ex;
+    wire wb_tlb_fill_en  = wb_tlb_fill_en_raw  & ~wb_ex;
+    wire wb_tlb_wr_en    = wb_tlb_wr_en_raw    & ~wb_ex;
+    wire wb_invtlb_valid = wb_invtlb_valid_raw & ~wb_ex;
     wire wb_tlb_or_csr_we;
     wire [1:0] wb_inst_tlb_ex;
     wire [2:0] wb_data_tlb_ex;
@@ -1387,6 +1469,7 @@ module core_top(
         .clk(clk),
         .rst(rst),
         .wb_ex(wb_ex),
+        .wb_hold(idle_freeze),
         .mem_ready_go(mem_ready_go),
         .mem_alu_result(mem_alu_ret),
         .mem_ref_we(mem_ref_we),
@@ -1456,7 +1539,7 @@ module core_top(
         .wb_data_addr(wb_data_addr),
         .wb_csr_num(wb_csr_num),
         .wb_csr_we(wb_csr_we),
-        .wb_is_ertn(wb_is_ertn),
+        .wb_is_ertn(wb_is_ertn_raw),
         .wb_is_syscall(wb_is_syscall),
         .wb_res_from_csr(wb_res_from_csr),
         .wb_csr_wmask(wb_csr_wmask),
@@ -1474,15 +1557,15 @@ module core_top(
         .wb_res_from_cnt(wb_res_from_cnt),
         .wb_res_from_tid(wb_res_from_tid),
         .wb_need_cancel(wb_need_cancel),
-        .wb_inst_tlbrd(wb_inst_tlbrd),
-        .wb_inst_tlbsrch(wb_inst_tlbsrch),
-        .wb_tlb_we(wb_tlb_we),
-        .wb_tlb_wr_en(wb_tlb_wr_en),
-        .wb_tlb_fill_en(wb_tlb_fill_en),
+        .wb_inst_tlbrd(wb_inst_tlbrd_raw),
+        .wb_inst_tlbsrch(wb_inst_tlbsrch_raw),
+        .wb_tlb_we(wb_tlb_we_raw),
+        .wb_tlb_wr_en(wb_tlb_wr_en_raw),
+        .wb_tlb_fill_en(wb_tlb_fill_en_raw),
         .wb_invtlb_asid(wb_invtlb_asid),
         .wb_invtlb_op(wb_invtlb_op),
         .wb_invtlb_va(wb_invtlb_va),
-        .wb_invtlb_valid(wb_invtlb_valid),
+        .wb_invtlb_valid(wb_invtlb_valid_raw),
         .wb_tlb_or_csr_we(wb_tlb_or_csr_we),
         .wb_inst_tlb_ex(wb_inst_tlb_ex),
         .wb_data_tlb_ex(wb_data_tlb_ex),
@@ -1513,7 +1596,10 @@ module core_top(
 
     assign rf_raddr1 = id_rj;
     assign rf_raddr2 = id_src2_is_rd? id_rd: id_rk;
-    assign rf_wdata = wb_res_from_dram? mem_to_rf_data:
+    // sc.w：写回条件存储成功标志（wb_dram_we 已被 LLbit 门控，成功=1/失败=0）
+    wire wb_is_sc_w = (wb_inst[31:24] == 8'h21);
+    assign rf_wdata = wb_is_sc_w ?     {31'b0, wb_dram_we} :
+                      wb_res_from_dram? mem_to_rf_data:
                       (wb_res_from_csr|wb_res_from_tid)? csr_rvalue :
                       wb_res_from_cnt?  wb_res_of_cnt:wb_alu_result;
 
@@ -1561,7 +1647,7 @@ module core_top(
     //assign wb_ready_go=1'b1;
     assign if_ready_go = rst? 1'b1:
                          (IF_ready_go == 1'b1) ?     1'b1:
-                        (if_pc!=32'h1bfffffc&&real_inst_data_ok==1'b0)? 1'b0 :
+                        (if_pc!=32'h1bfffffc&&real_inst_data_ok==1'b0&&!(if_suppress_dup_fetch_req&&inst_sram_rdata_safe_valid&&inst_sram_rdata_safe_pc==if_pc)&&!(br_cancel_fallthrough&&if_suppress_dup_fetch_req))? 1'b0 :
                         (exe1_ref_we&&exe1_rd!=0&&((id_src1_from_ref&&(rf_raddr1==exe1_rd))||(id_src2_from_ref&&(rf_raddr2==exe1_rd))))? 1'b0 :
                         (exe2_ref_we&&exe2_rd!=0&&((id_src1_from_ref&&(rf_raddr1==exe2_rd))||(id_src2_from_ref&&(rf_raddr2==exe2_rd))))? 1'b0 :
                         (mem_ref_we&&mem_rd!=0&&((id_src1_from_ref&&(rf_raddr1==mem_rd))||(id_src2_from_ref&&(rf_raddr2==mem_rd))))?  1'b0:
@@ -1600,7 +1686,7 @@ module core_top(
                         // (exe_csr_we&&(exe_csr_num==14'h4||exe_csr_num==14'd5||exe_csr_num==14'b0)) ?       1'b0:
                         // (mem_csr_we&&(mem_csr_num==14'h4||mem_csr_num==14'd5||mem_csr_num==14'b0)) ?       1'b0:
                         // (wb_csr_we&&(wb_csr_num==14'h4||wb_csr_num==14'd5||wb_csr_num==14'b0)) ?       1'b0:   1'b1;
-    assign wb_allow_in = 1'b1;
+    assign wb_allow_in = ~idle_freeze;   // idle 等待期间冻结 WB，令 idle+4 停在 WB
     assign mem_allow_in = wb_allow_in && !(mem_ready_go===1'b0);
     assign exe2_allow_in = mem_allow_in && !(exe2_ready_go===1'b0);
     assign exe1_allow_in = exe2_allow_in && !(exe1_ready_go===1'b0);
@@ -1628,12 +1714,15 @@ module core_top(
         .clk(clk),
         .rst(rst),
         // Re-check IE at WB: interrupt detected in ID may have IE cleared by now
-        .wb_has_int(wb_has_int && csr_crmd_ie),
+        // idle_wake：从 idle 等待中被唤醒时，中断在 WB 处才挂起，流水线透传的
+        // wb_has_int 尚为 0，需在此补入，令 WB 上的 idle+4 响应中断（era=idle+4）。
+        .wb_has_int((wb_has_int | idle_wake) && csr_crmd_ie),
         .wb_int_ecode(wb_int_ecode),
         .wb_int_esubcode(wb_int_esubcode),
         .wb_ex_adef(wb_ex_adef),
         .wb_ex_brk(wb_ex_brk),
         .wb_ex_ine(wb_ex_ine),
+        .wb_ex_ipe(wb_ex_ipe),
         .wb_ex_ale(wb_ex_ale),
         .wb_is_syscall(wb_is_syscall),
         .wb_is_ertn(wb_is_ertn),
@@ -1646,6 +1735,75 @@ module core_top(
         .trap_flush(trap_flush),
         .trap_ertn(trap_ertn)
     );
+
+    // Linux PC/stall trace.  This is simulation-only instrumentation: it prints
+    // the PC/inst carried by each pipeline stage and the ready/allow/handshake
+    // signals needed to decide which stage blocks progress.
+    // synthesis translate_off
+    reg [63:0] linpc_cycle;
+    reg [31:0] linpc_last_if_pc;
+    reg [31:0] linpc_last_id_pc;
+    reg [31:0] linpc_last_exe1_pc;
+    reg [31:0] linpc_last_exe2_pc;
+    reg [31:0] linpc_last_mem_pc;
+    reg [31:0] linpc_last_wb_pc;
+    reg [31:0] linpc_last_if_inst;
+    reg [31:0] linpc_last_id_inst;
+    reg [31:0] linpc_last_exe1_inst;
+    reg [31:0] linpc_last_exe2_inst;
+    reg [31:0] linpc_last_mem_inst;
+    reg [31:0] linpc_last_wb_inst;
+    reg [31:0] linpc_same_cnt;
+
+    wire linpc_changed = (if_pc   != linpc_last_if_pc)   || (if_inst   != linpc_last_if_inst)   ||
+                          (id_pc   != linpc_last_id_pc)   || (id_inst   != linpc_last_id_inst)   ||
+                          (exe1_pc != linpc_last_exe1_pc) || (exe1_inst != linpc_last_exe1_inst) ||
+                          (exe2_pc != linpc_last_exe2_pc) || (exe2_inst != linpc_last_exe2_inst) ||
+                          (mem_pc  != linpc_last_mem_pc)  || (mem_inst  != linpc_last_mem_inst)  ||
+                          (wb_pc   != linpc_last_wb_pc)   || (wb_inst   != linpc_last_wb_inst);
+
+    always @(posedge clk) begin
+        if (rst) begin
+            linpc_cycle <= 64'd0;
+            linpc_last_if_pc <= 32'b0;
+            linpc_last_id_pc <= 32'b0;
+            linpc_last_exe1_pc <= 32'b0;
+            linpc_last_exe2_pc <= 32'b0;
+            linpc_last_mem_pc <= 32'b0;
+            linpc_last_wb_pc <= 32'b0;
+            linpc_last_if_inst <= 32'b0;
+            linpc_last_id_inst <= 32'b0;
+            linpc_last_exe1_inst <= 32'b0;
+            linpc_last_exe2_inst <= 32'b0;
+            linpc_last_mem_inst <= 32'b0;
+            linpc_last_wb_inst <= 32'b0;
+            linpc_same_cnt <= 32'd0;
+        end else begin
+            linpc_cycle <= linpc_cycle + 64'd1;
+            linpc_same_cnt <= linpc_changed ? 32'd0 : (linpc_same_cnt + 32'd1);
+
+            if (($time >= 1225500 && $time <= 1228300) ||
+                linpc_changed || linpc_same_cnt[9:0] == 10'd0) begin
+                
+            end
+
+            if (linpc_changed) begin
+                linpc_last_if_pc <= if_pc;
+                linpc_last_id_pc <= id_pc;
+                linpc_last_exe1_pc <= exe1_pc;
+                linpc_last_exe2_pc <= exe2_pc;
+                linpc_last_mem_pc <= mem_pc;
+                linpc_last_wb_pc <= wb_pc;
+                linpc_last_if_inst <= if_inst;
+                linpc_last_id_inst <= id_inst;
+                linpc_last_exe1_inst <= exe1_inst;
+                linpc_last_exe2_inst <= exe2_inst;
+                linpc_last_mem_inst <= mem_inst;
+                linpc_last_wb_inst <= wb_inst;
+            end
+        end
+    end
+    // synthesis translate_on
 
     /* MEM store trace — memcpy region only */
     always @(posedge clk) begin
@@ -1662,6 +1820,8 @@ module core_top(
                 $time, wb_ecode, id_ex_adef, wb_ex_adef, wb_ex_ale, wb_pc,
                 csr_dmw0, csr_dmw1);
     end
+
+
 
     // Wb_stage current exception detection is handled by trap_unit.
     // Wb_stage wb_stage(
@@ -1785,12 +1945,17 @@ module core_top(
 
     wire [25:0] csr_tlbrentry;
 
+    // 原子 LLbit：ll.w 提交置位，sc.w 提交清位（wb_valid 已排除取消/无效指令）
+    wire csr_llbit;
+    wire ll_w_set    = wb_valid && !wb_ex && (wb_inst[31:24] == 8'h20);
+    wire sc_w_commit = wb_valid && !wb_ex && (wb_inst[31:24] == 8'h21);
+
     CSRREG csr(
         .clk(clk),//
         .rst(rst),//
         .timer_advance(!exe1_dropped),
         .csr_num(csr_num),//
-        .csr_we(wb_csr_we),//
+        .csr_we(wb_csr_we & ~wb_ex),// 异常发生时压制显式CSR写（如IPE落在csrwr上）
         .csr_wmask(wb_csr_wmask),//
         .wb_ertn_flush(wb_is_ertn),//
         .wb_ex(csr_ex),//
@@ -1801,7 +1966,7 @@ module core_top(
         .ipi_int_in(ipi_int_in),
         .csr_rvalue(csr_rvalue),//
         .csr_wvalue(wb_csr_wdata),//
-        .wb_pc(wb_pc),//
+        .wb_pc(csr_wb_pc_eff),//
         .csr_era_pc(csr_era_pc),
         .wb_ex_ale(wb_ex_ale),
         .wb_ex_ale_addr(wb_ex_ale_addr),
@@ -1904,7 +2069,10 @@ module core_top(
         .csr_crmd_plv(csr_crmd_plv),
         .csr_inst_tlb_refill(csr_inst_tlb_refill),
         .csr_data_tlb_refill(csr_data_tlb_refill),
-        .csr_tlbrentry(csr_tlbrentry)
+        .csr_tlbrentry(csr_tlbrentry),
+        .ll_w_set(ll_w_set),
+        .sc_w_commit(sc_w_commit),
+        .csr_llbit(csr_llbit)
 `ifdef DIFFTEST_EN
         ,
         .csr_all_diff(csr_all_diff)
@@ -2518,11 +2686,13 @@ module core_top(
             {cmt_ecode, cmt_tlbfill_index} <= 0;
             {trap, trap_code, cycleCnt, instrCnt} <= 0;
         end else if (~trap) begin
-            cmt_valid           <= wb_valid && !wb_ex;
-            cmt_cnt_instr       <= wb_res_from_cnt;
+            // idle 冻结期间 idle+4 停在 WB，不得重复提交（NEMU 停在 idle 处）
+            cmt_valid           <= wb_valid && !wb_ex && !idle_freeze;
+            cmt_cnt_instr       <= wb_res_from_cnt | wb_is_csrrd_tval;
             cmt_stable_counter  <= csr_timer_64;
             cmt_inst_ld_en      <= wb_is_load;
-            cmt_inst_st_en      <= wb_is_store ? ((wb_wdram_num == 2'b00) ? 8'b0000_0100 :
+            cmt_inst_st_en      <= wb_is_store ? (wb_is_sc_w              ? 8'b0000_1000 :  // sc.w 成功
+                                                   (wb_wdram_num == 2'b00) ? 8'b0000_0100 :
                                                    (wb_wdram_num == 2'b10) ? 8'b0000_0010 :
                                                    (wb_wdram_num == 2'b01) ? 8'b0000_0001 :
                                                                               8'b0000_0000) :
@@ -2539,11 +2709,13 @@ module core_top(
             cmt_wen             <= wb_rf_we;
             cmt_wdest           <= {3'd0, wb_rd};
             cmt_wdata           <= rf_wdata;
-            cmt_pc              <= debug0_wb_pc;
+            cmt_pc              <= idle_wake ? idle_era_r : debug0_wb_pc;
             cmt_inst            <= wb_inst;
-            cmt_ex              <= wb_valid && wb_ex;
+            // idle 唤醒当拍在气泡上响应中断：wb_valid=0，需显式上报异常事件，
+            // 令 difftest 调用 raise_intr 唤醒 NEMU（era=idle+4，this_pc=eentry）。
+            cmt_ex              <= (wb_valid && wb_ex) || idle_wake;
             cmt_is_ertn         <= wb_is_ertn;
-            cmt_ecode           <= wb_ecode;
+            cmt_ecode           <= idle_wake ? 6'h00 : wb_ecode;   // 唤醒为中断 INT(0)
             cmt_is_tlbfill      <= wb_is_tlbfill;
             cmt_tlbfill_index   <= wb_tlbfill_index;
             trap                <= 1'b0;

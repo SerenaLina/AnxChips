@@ -2,6 +2,7 @@ module Wb_reg (
     input wire clk,
     input wire rst,
     input wire mem_ready_go,
+    input wire wb_hold,        // idle 等待期间保持 WB 内容（保留 idle+4，不产生气泡、不latch上游）
     input wire wb_ex,
     input wire [31:0] mem_alu_result,
     input wire mem_ref_we,
@@ -167,6 +168,8 @@ always @(posedge clk ) begin
         wb_data_tlb_ex <= 3'b0;
         wb_inst <= 32'd0;
         //wb_csr_rdata<=32'b0;
+    end else if(wb_hold) begin
+        // idle 等待中断：保持 WB 现有内容（idle+4 valid 停在 WB），不 latch 上游、不产生气泡
     end else if(!(mem_ready_go===1'b0))begin
         wb_rf_we <= mem_ref_we;
         wb_alu_result <= mem_alu_result;

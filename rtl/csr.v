@@ -8,6 +8,10 @@
 `define CSR_ESTAT_IS10 1:0
 `define CSR_TICLR 14'h44
 `define CSR_TICLR_CLR 0
+`define CSR_LLBCTL 14'h60
+`define CSR_LLBCTL_ROLLB 0
+`define CSR_LLBCTL_WCLLB 1
+`define CSR_LLBCTL_KLO   2
 `define CSR_ERA_PC 31:0
 `define CSR_ERA 14'd6
 `define CSR_EENTRY_VA 31:6
@@ -27,8 +31,9 @@
 `define CSR_TID_TID 31:0
 `define CSR_TCFG_EN 0
 `define CSR_TCFG_PERIOD 1
-`define CSR_TCFG_INITV 30:2
+`define CSR_TCFG_INITV 31:2
 `define CSR_TCFG 14'h41
+`define CSR_TVAL 14'h42
 `define ECODE_ALE 6'h9
 `define CSR_CRMD_DATF 6:5
 `define CSR_CRMD_DATM 8:7
@@ -78,6 +83,10 @@
 `define CSR_DMW1_VSEG 31:29
 `define CSR_CRMD_DA 3
 `define CSR_CRMD_PG 4
+`define CSR_PGDL 14'h19
+`define CSR_PGDH 14'h1a
+`define CSR_PGD  14'h1b
+`define CSR_PGD_BASE 31:12
 
 
 
@@ -195,7 +204,12 @@ module CSRREG (
     output reg [1:0]csr_crmd_plv,
     input wire csr_inst_tlb_refill,
     input wire csr_data_tlb_refill,
-    output reg [25:0] csr_tlbrentry
+    output reg [25:0] csr_tlbrentry,
+
+    // 原子访存 LLbit / LLBCTL(0x60)
+    input wire ll_w_set,        // 提交的 ll.w：置 LLbit
+    input wire sc_w_commit,     // 提交的 sc.w：清 LLbit
+    output wire csr_llbit       // 供 EXE2 对 sc.w 做门控
 `ifdef DIFFTEST_EN
     ,
     output wire [831:0] csr_all_diff
@@ -219,10 +233,19 @@ module CSRREG (
     reg [31:0]timer_cnt;
     reg csr_tcfg_en;
     reg csr_tcfg_periodic;
-    reg [28:0]csr_tcfg_initval;
+    reg [29:0]csr_tcfg_initval;
     wire [31:0]tcfg_next_value;
     wire [31:0]csr_tval;
     reg [31:0] csr_badv_vaddr;
+
+    // PGDL(0x19)/PGDH(0x1a) 页目录基址；PGD(0x1b) 只读，按 BADV[31] 选择
+    reg [19:0] csr_pgdl_base;
+    reg [19:0] csr_pgdh_base;
+
+    // LLBCTL(0x60): ROLLB=LLbit(只读), WCLLB(写1清LLbit), KLO(ertn时保持LLbit)
+    reg csr_llbctl_llbit;
+    reg csr_llbctl_klo;
+    assign csr_llbit = csr_llbctl_llbit;
 
 
 
@@ -369,13 +392,13 @@ module CSRREG (
         csr_estat_is[10]<=1'b0;
         csr_estat_is[9:2]<=hw_int_in[7:0];
 
-        if(timer_cnt[31:0]==32'b0)
-        begin
-            csr_estat_is[11]<=1'b1;
-        end
-        else if(csr_we && csr_num==`CSR_TICLR && csr_wmask[`CSR_TICLR_CLR] && csr_wvalue[`CSR_TICLR_CLR])
+        if(csr_we && csr_num==`CSR_TICLR && csr_wmask[`CSR_TICLR_CLR] && csr_wvalue[`CSR_TICLR_CLR])
         begin
             csr_estat_is[11] <=1'b0;
+        end
+        else if(timer_cnt[31:0]==32'b0)
+        begin
+            csr_estat_is[11]<=1'b1;
         end
 
         csr_estat_is[12]<=ipi_int_in;
@@ -418,9 +441,9 @@ module CSRREG (
         csr_save0_data<=csr_wmask[`CSR_SAVE_DATA]&csr_wvalue[`CSR_SAVE_DATA] | ~csr_wmask[`CSR_SAVE_DATA]&csr_save0_data;
         if(csr_we &&csr_num==`CSR_SAVE1)
         csr_save1_data<=csr_wmask[`CSR_SAVE_DATA]&csr_wvalue[`CSR_SAVE_DATA] | ~csr_wmask[`CSR_SAVE_DATA]&csr_save1_data;
-        if(csr_we &&csr_num==`CSR_SAVE0)
+        if(csr_we &&csr_num==`CSR_SAVE2)
         csr_save2_data<=csr_wmask[`CSR_SAVE_DATA]&csr_wvalue[`CSR_SAVE_DATA] | ~csr_wmask[`CSR_SAVE_DATA]&csr_save2_data;
-        if(csr_we &&csr_num==`CSR_SAVE0)
+        if(csr_we &&csr_num==`CSR_SAVE3)
         csr_save3_data<=csr_wmask[`CSR_SAVE_DATA]&csr_wvalue[`CSR_SAVE_DATA] | ~csr_wmask[`CSR_SAVE_DATA]&csr_save3_data;
     end
 
@@ -461,6 +484,58 @@ module CSRREG (
         end
     end
 
+    // PGDL / PGDH 写逻辑（普通读写 CSR，只存 [31:12] 基址位）
+    always @(posedge clk)
+    begin
+        if(rst) begin
+            csr_pgdl_base <= 20'b0;
+            csr_pgdh_base <= 20'b0;
+        end
+        else if(csr_we && csr_num == `CSR_PGDL)
+            csr_pgdl_base <= csr_wmask[`CSR_PGD_BASE] & csr_wvalue[`CSR_PGD_BASE]
+                           | ~csr_wmask[`CSR_PGD_BASE] & csr_pgdl_base;
+        else if(csr_we && csr_num == `CSR_PGDH)
+            csr_pgdh_base <= csr_wmask[`CSR_PGD_BASE] & csr_wvalue[`CSR_PGD_BASE]
+                           | ~csr_wmask[`CSR_PGD_BASE] & csr_pgdh_base;
+    end
+
+    // LLBCTL: LLbit 与 KLO 状态机
+    // 优先级（单发射，每拍仅一条指令提交，事件互斥）：
+    //   复位 > ll.w置位 > sc.w清位 > csrwr/csrxchg写LLBCTL(WCLLB清/KLO写) > ertn
+    // ertn：KLO=1时保持LLbit并清KLO；否则清LLbit
+    always @(posedge clk)
+    begin
+        if(rst)
+        begin
+            csr_llbctl_llbit <= 1'b0;
+            csr_llbctl_klo   <= 1'b0;
+        end
+        else if(ll_w_set)
+        begin
+            csr_llbctl_llbit <= 1'b1;   // ll.w 仅置 LLbit，不影响 KLO
+        end
+        else if(sc_w_commit)
+        begin
+            csr_llbctl_llbit <= 1'b0;   // sc.w 无论成败都清 LLbit
+        end
+        else if(csr_we && csr_num==`CSR_LLBCTL && !wb_ertn_flush)
+        begin
+            // WCLLB(bit1)写1 -> 清 LLbit
+            if(csr_wmask[`CSR_LLBCTL_WCLLB] && csr_wvalue[`CSR_LLBCTL_WCLLB])
+                csr_llbctl_llbit <= 1'b0;
+            // KLO(bit2)可读写
+            csr_llbctl_klo <= csr_wmask[`CSR_LLBCTL_KLO] & csr_wvalue[`CSR_LLBCTL_KLO]
+                            | ~csr_wmask[`CSR_LLBCTL_KLO] & csr_llbctl_klo;
+        end
+        else if(wb_ertn_flush)
+        begin
+            if(csr_llbctl_klo)
+                csr_llbctl_klo <= 1'b0;      // KLO=1：保持LLbit，仅清KLO
+            else
+                csr_llbctl_llbit <= 1'b0;    // KLO=0：清LLbit
+        end
+    end
+
     always @(posedge clk)
     begin
         if(rst)
@@ -492,12 +567,12 @@ module CSRREG (
         timer_cnt<=32'hffffffff;
         else if(csr_we &&csr_num==`CSR_TCFG &&tcfg_next_value[`CSR_TCFG_EN])
         timer_cnt<={tcfg_next_value[`CSR_TCFG_INITV],2'b00};
-        else if(csr_tcfg_en && csr_tcfg_periodic!=32'hffffffff)
+        else if(csr_tcfg_en)
         begin
-            if(timer_cnt[31:0]==32'b0 &&csr_tcfg_periodic)
-            timer_cnt<={csr_tcfg_initval,2'b0};
+            if(timer_cnt[31:0]==32'b0 && csr_tcfg_periodic)
+            timer_cnt<={csr_tcfg_initval,2'b0};   // periodic: 到 0 重装载
             else
-            timer_cnt<=timer_cnt-1'b1;
+            timer_cnt<=timer_cnt-1'b1;            // 计数/回绕，使 cnt==0 仅维持一拍
         end
     end
 
@@ -509,7 +584,9 @@ module CSRREG (
         if (rst)
             csr_tlbidx_full <= 32'b0;
         else if (csr_we && csr_num == `CSR_TLBIDX)
-            csr_tlbidx_full <= (csr_wmask & csr_wvalue) | (~csr_wmask & csr_tlbidx_full);
+            // 仅可写字段：NE[31] | PS[29:24] | Index[4:0]（与golden一致，掩码0xbf00001f）
+            csr_tlbidx_full <= (csr_wmask & csr_wvalue & 32'hbf00001f)
+                             | (~(csr_wmask & 32'hbf00001f) & csr_tlbidx_full);
         else if (csr_tlbidx_ne_we || csr_tlbidx_ps_we || csr_tlbidx_index_we)
             csr_tlbidx_full <= {csr_tlbidx_ne_we ? csr_tlbidx_ne_wvalue : csr_tlbidx_ne,
                                 1'b0,
@@ -921,7 +998,7 @@ module CSRREG (
     wire [31:0] csr_ecfg_rvalue ={19'b0,csr_ecfg_lie};
     wire [31:0] csr_badv_rvalue ={csr_badv_vaddr};
     wire [31:0] csr_tid_rvalue =csr_tid_tid;
-    wire [31:0] csr_tcfg_rvalue ={1'b0,csr_tcfg_initval,csr_tcfg_periodic,csr_tcfg_en};
+    wire [31:0] csr_tcfg_rvalue ={csr_tcfg_initval,csr_tcfg_periodic,csr_tcfg_en};
     wire [31:0] csr_asid_rvalue ={8'b0,8'b1010,6'b0,csr_asid_asid};
     wire [31:0] csr_tlbidx_rvalue = csr_tlbidx_full;
     // DEBUG: check if csr_wvalue has bits outside the stored sub-fields
@@ -949,6 +1026,13 @@ module CSRREG (
     wire [31:0] csr_tlbrentry_rvalue ={csr_tlbrentry,6'b0};
     wire [31:0] csr_dmw0_rvalue ={csr_dmw0_vseg,1'b0,csr_dmw0_pseg,19'b0,csr_dmw0_mat,csr_dmw0_plv3,2'b0,csr_dmw0_plv0};
     wire [31:0] csr_dmw1_rvalue ={csr_dmw1_vseg,1'b0,csr_dmw1_pseg,19'b0,csr_dmw1_mat,csr_dmw1_plv3,2'b0,csr_dmw1_plv0};
+    // LLBCTL: [0]=ROLLB(LLbit), [1]=WCLLB(读为0), [2]=KLO
+    wire [31:0] csr_llbctl_rvalue = {29'b0, csr_llbctl_klo, 1'b0, csr_llbctl_llbit};
+
+    // PGDL/PGDH：仅 [31:12] 有效，低位读 0；PGD 只读，BADV[31]=1 选 PGDH 否则 PGDL
+    wire [31:0] csr_pgdl_rvalue = {csr_pgdl_base, 12'b0};
+    wire [31:0] csr_pgdh_rvalue = {csr_pgdh_base, 12'b0};
+    wire [31:0] csr_pgd_rvalue  = csr_badv_vaddr[31] ? csr_pgdh_rvalue : csr_pgdl_rvalue;
 
 `ifdef DIFFTEST_EN
     // difftest CSR bus: 26 slots x 32 bits = 832 bits
@@ -966,8 +1050,8 @@ module CSRREG (
         csr_tlbelo0_rvalue,     // [543:512] slot 16
         csr_tlbelo1_rvalue,     // [511:480] slot 15
         csr_asid_rvalue,        // [479:448] slot 14
-        32'h0,                  // [447:416] slot 13 pgdl (not implemented)
-        32'h0,                  // [415:384] slot 12 pgdh (not implemented)
+        csr_pgdl_rvalue,        // [447:416] slot 13 pgdl
+        csr_pgdh_rvalue,        // [415:384] slot 12 pgdh
         csr_save0_rvalue,       // [383:352] slot 11
         csr_save1_rvalue,       // [351:320] slot 10
         csr_save2_rvalue,       // [319:288] slot 9
@@ -976,7 +1060,7 @@ module CSRREG (
         csr_tcfg_rvalue,        // [223:192] slot 6
         csr_tval,               // [191:160] slot 5 tval
         32'h0,                  // [159:128] slot 4 ticlr (not implemented)
-        32'h0,                  // [127:96]  slot 3 llbctl (not implemented)
+        csr_llbctl_rvalue,      // [127:96]  slot 3 llbctl
         csr_tlbrentry_rvalue,   // [95:64]   slot 2
         csr_dmw0_rvalue,        // [63:32]   slot 1
         csr_dmw1_rvalue         // [31:0]    slot 0
@@ -996,6 +1080,7 @@ module CSRREG (
                     | {32{csr_num==`CSR_BADV}}  &  csr_badv_rvalue
                     | {32{csr_num==`CSR_TID}}   &  csr_tid_rvalue
                     | {32{csr_num==`CSR_TCFG}}  &  csr_tcfg_rvalue
+                    | {32{csr_num==`CSR_TVAL}}  &  csr_tval
                     | {32{csr_num==`CSR_ASID}}  &  csr_asid_rvalue
                     | {32{csr_num==`CSR_TLBIDX}}  &  csr_tlbidx_rvalue
                     | {32{csr_num==`CSR_TLBEHI}}  &  csr_tlbehi_rvalue
@@ -1003,6 +1088,10 @@ module CSRREG (
                     | {32{csr_num==`CSR_TLBELO1}}  &  csr_tlbelo1_rvalue
                     | {32{csr_num==`CSR_TLBRENTRY}}  &  csr_tlbrentry_rvalue
                     | {32{csr_num==`CSR_DMW0}}  &  csr_dmw0_rvalue
-                    | {32{csr_num==`CSR_DMW1}}  &  csr_dmw1_rvalue;
+                    | {32{csr_num==`CSR_DMW1}}  &  csr_dmw1_rvalue
+                    | {32{csr_num==`CSR_PGDL}}  &  csr_pgdl_rvalue
+                    | {32{csr_num==`CSR_PGDH}}  &  csr_pgdh_rvalue
+                    | {32{csr_num==`CSR_PGD}}   &  csr_pgd_rvalue
+                    | {32{csr_num==`CSR_LLBCTL}}&  csr_llbctl_rvalue;
 
 endmodule

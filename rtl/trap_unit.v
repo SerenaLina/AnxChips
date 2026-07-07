@@ -9,6 +9,7 @@ module trap_unit (
     input wire        wb_ex_adef,
     input wire        wb_ex_brk,
     input wire        wb_ex_ine,
+    input wire        wb_ex_ipe,
     input wire        wb_ex_ale,
     input wire        wb_is_syscall,
     input wire        wb_is_ertn,
@@ -37,6 +38,7 @@ module trap_unit (
     localparam SYS  = 6'h0B;
     localparam BRK  = 6'h0C;
     localparam INE  = 6'h0D;
+    localparam IPE  = 6'h0E;
 
     // 优先级仲�?
     always @(*) begin
@@ -93,6 +95,10 @@ module trap_unit (
             else if (wb_ex_brk) begin
                 trap_ex_valid = 1'b1;
                 trap_ecode    = BRK;
+            end
+            else if (wb_ex_ipe) begin
+                trap_ex_valid = 1'b1;
+                trap_ecode    = IPE;
             end
             else if (wb_ex_ine) begin
                 trap_ex_valid = 1'b1;
