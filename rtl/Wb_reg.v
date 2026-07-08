@@ -20,6 +20,7 @@ module Wb_reg (
     input wire mem_rdram_need_signed_extend,
     input wire mem_rdram_need_zero_extend,
     input wire [31:0] mem_data_addr,
+    input wire [31:0] mem_data_paddr,
     input wire [13:0] mem_csr_num,
     input wire mem_csr_we,
     input wire mem_is_ertn,
@@ -75,6 +76,7 @@ module Wb_reg (
     output reg wb_rdram_need_signed_extend,
     output reg wb_rdram_need_zero_extend ,
     output reg [31:0] wb_data_addr,
+    output reg [31:0] wb_data_paddr,
     output reg [13:0] wb_csr_num,
     output reg wb_csr_we,
     output reg wb_is_ertn,
@@ -132,6 +134,7 @@ always @(posedge clk ) begin
         wb_rdram_need_signed_extend<=1'b0;
         wb_rdram_need_zero_extend<=1'b0;
         wb_data_addr<=32'b0;
+        wb_data_paddr<=32'b0;
         wb_csr_num<=14'b0;
         wb_csr_we<=1'b0;
         wb_is_ertn<=1'b0;
@@ -187,6 +190,7 @@ always @(posedge clk ) begin
         wb_rdram_need_signed_extend<=mem_rdram_need_signed_extend;
         wb_rdram_need_zero_extend<=mem_rdram_need_zero_extend;
         wb_data_addr<=mem_data_addr;
+        wb_data_paddr<=mem_data_paddr;
         wb_csr_num<=mem_csr_num;
         wb_csr_we<=mem_csr_we;
         wb_is_ertn<=mem_is_ertn;
@@ -242,6 +246,7 @@ always @(posedge clk ) begin
         wb_rdram_need_signed_extend<=1'b0;
         wb_rdram_need_zero_extend<=1'b0;
         wb_data_addr<=32'b0;
+        wb_data_paddr<=32'b0;
         wb_csr_num<=14'b0;
         wb_csr_we<=1'b0;
         wb_is_ertn<=1'b0;

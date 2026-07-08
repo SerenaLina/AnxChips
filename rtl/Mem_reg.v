@@ -44,6 +44,7 @@ module Mem_reg (
     input wire exe2_res_from_tid,
     input wire exe2_need_data_sram,
     input wire [31:0] exe2_data_addr,
+    input wire [31:0] exe2_data_paddr,   // TLB/DMW 翻译后物理地址，仅供 difftest StoreEvent 上报
     input wire exe2_need_cancel,
     input wire exe2_inst_tlbrd,
     input wire exe2_inst_tlbsrch,
@@ -98,6 +99,7 @@ module Mem_reg (
     output reg mem_res_from_tid,
     output reg mem_need_data_sram,
     output reg [31:0] mem_data_addr,
+    output reg [31:0] mem_data_paddr,
     output reg mem_need_cancel,
     output reg mem_inst_tlbrd,
     output reg mem_inst_tlbsrch,
@@ -157,6 +159,7 @@ always @(posedge clk) begin
         mem_res_from_tid<=1'b0;
         mem_need_data_sram<=1'b0;
         mem_data_addr <= 32'b0;
+        mem_data_paddr <= 32'b0;
         mem_need_cancel <= 1'b0;
         mem_inst_tlbrd <= 1'b0;
         mem_inst_tlbsrch <= 1'b0;
@@ -215,6 +218,7 @@ always @(posedge clk) begin
                 mem_res_from_tid<=exe2_res_from_tid;
                 mem_need_data_sram<=exe2_need_data_sram;
                 mem_data_addr <= exe2_data_addr;
+                mem_data_paddr <= exe2_data_paddr;
                 mem_need_cancel <= exe2_need_cancel;
                 mem_inst_tlbrd <= exe2_inst_tlbrd;
                 mem_inst_tlbsrch <= exe2_inst_tlbsrch;
@@ -273,6 +277,7 @@ always @(posedge clk) begin
                 mem_res_from_tid<=mem_res_from_tid;
                 mem_need_data_sram<=mem_need_data_sram;
                 mem_data_addr <= mem_data_addr;
+                mem_data_paddr <= mem_data_paddr;
                 mem_need_cancel <= mem_need_cancel;
                 mem_inst_tlbrd <= mem_inst_tlbrd;
                 mem_inst_tlbsrch <= mem_inst_tlbsrch;
@@ -329,6 +334,7 @@ always @(posedge clk) begin
                 mem_res_from_tid<=1'b0;
                 mem_need_data_sram<=1'b0;
                 mem_data_addr <= 32'b0;
+                mem_data_paddr <= 32'b0;
                 mem_need_cancel <= 1'b0;
                 mem_inst_tlbrd <= 1'b0;
                 mem_inst_tlbsrch <= 1'b0;
@@ -386,6 +392,7 @@ always @(posedge clk) begin
                 mem_res_from_tid<=mem_res_from_tid;
                 mem_need_data_sram<=mem_need_data_sram;
                 mem_data_addr <= mem_data_addr;
+                mem_data_paddr <= mem_data_paddr;
                 mem_need_cancel <= mem_need_cancel;
                 mem_inst_tlbrd <= mem_inst_tlbrd;
                 mem_inst_tlbsrch <= mem_inst_tlbsrch;
@@ -444,6 +451,7 @@ always @(posedge clk) begin
                 mem_res_from_tid<=exe2_res_from_tid;
                 mem_need_data_sram<=exe2_need_data_sram;
                 mem_data_addr <= exe2_data_addr;
+                mem_data_paddr <= exe2_data_paddr;
                 mem_need_cancel <= exe2_need_cancel;
                 mem_inst_tlbrd <= exe2_inst_tlbrd;
                 mem_inst_tlbsrch <= exe2_inst_tlbsrch;

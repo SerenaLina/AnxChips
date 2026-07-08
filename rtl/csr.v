@@ -328,13 +328,10 @@ module CSRREG (
         end
         else if(wb_ex)
         begin
-            $display("[CSR-EX] %0t: wb_ex=1 crmd_plv<=0 (old=%b)", $time, csr_crmd_plv);
             csr_crmd_plv<=2'b0;
         end
         else if(wb_ertn_flush)
         begin
-            $display("[CSR-ERTN] %0t: ertn_flush=1 pplv=%b crmd_plv_old=%b",
-                $time, csr_prmd_pplv, csr_crmd_plv);
             csr_crmd_plv<=csr_prmd_pplv;
         end
         else if(csr_we && csr_num == `CSR_CRMD)
@@ -368,8 +365,6 @@ module CSRREG (
     begin
         if(wb_ex)
         begin
-            $display("[CSR-EX] %0t: save prmd pplv=%b pie=%b from crmd_plv=%b crmd_ie=%b",
-                $time, csr_crmd_plv, csr_crmd_ie, csr_crmd_plv, csr_crmd_ie);
             csr_prmd_pplv<=csr_crmd_plv;
             csr_prmd_pie<=csr_crmd_ie;
         end
@@ -981,7 +976,13 @@ module CSRREG (
     end
 
 
-    assign csr_tval=timer_cnt-1'b1;
+    // TVAL 读回“当前定时器计数值”（手册 7.6.3：TimeVal = 当前计数值）。
+    // 到期那一拍 timer_cnt==0、ESTAT.TI 置起，此时 TVAL 必须读回 0。
+    // 原实现 timer_cnt-1 在 timer_cnt==0 时回绕成 0xFFFFFFFF：该值经 difftest
+    // (timercpy.time_val / ref.tval=dut.tval) 同步进 NEMU，使 NEMU 自主计时器在
+    // 到期边沿看到“离到期还差 ~4G”，把定时中断推迟很久，导致 DUT 比 REF 提前
+    // 数千条指令响应定时中断（difftest era 失配）。改为直接读 timer_cnt 与手册一致。
+    assign csr_tval=timer_cnt;
     assign csr_ticlr_clr =1'b0;
 
 
@@ -1001,25 +1002,6 @@ module CSRREG (
     wire [31:0] csr_tcfg_rvalue ={csr_tcfg_initval,csr_tcfg_periodic,csr_tcfg_en};
     wire [31:0] csr_asid_rvalue ={8'b0,8'b1010,6'b0,csr_asid_asid};
     wire [31:0] csr_tlbidx_rvalue = csr_tlbidx_full;
-    // DEBUG: check if csr_wvalue has bits outside the stored sub-fields
-    always @(posedge clk) begin
-        if (!rst && csr_we && csr_num == `CSR_TLBIDX) begin
-            $display("[TLBIDX-WR] %0t: wvalue=%h wmask=%h", $time, csr_wvalue, csr_wmask);
-            $display("[TLBIDX-WR]   bits-split: ne_wr=%b ps_wr=%h idx_wr=%h",
-                csr_wvalue[`CSR_TLBIDX_NE], csr_wvalue[`CSR_TLBIDX_PS], csr_wvalue[`CSR_TLBIDX_INDEX]);
-            $display("[TLBIDX-WR]   lost-bits[30]=%b lost[23:16]=%h lost[15:4]=%h",
-                csr_wvalue[30], csr_wvalue[23:16], csr_wvalue[15:4]);
-            $display("[TLBIDX-WR]   result-rvalue=%h", csr_tlbidx_rvalue);
-        end
-    end
-    reg  [31:0] prev_tlbidx;
-    always @(posedge clk) begin
-        prev_tlbidx <= csr_tlbidx_rvalue;
-        if (!rst && prev_tlbidx != csr_tlbidx_rvalue)
-            $display("[TLBIDX-CHG] %0t: old=%h new=%h ne=%b ps=%h idx=%h",
-                $time, prev_tlbidx, csr_tlbidx_rvalue,
-                csr_tlbidx_ne, csr_tlbidx_ps, csr_tlbidx_index);
-    end
     wire [31:0] csr_tlbehi_rvalue ={csr_tlbehi,13'b0};
     wire [31:0] csr_tlbelo0_rvalue ={4'b0,csr_tlbelo0_ppn,1'b0,csr_tlbelo0_g,csr_tlbelo0_mat,csr_tlbelo0_plv,csr_tlbelo0_d,csr_tlbelo0_v};
     wire [31:0] csr_tlbelo1_rvalue ={4'b0,csr_tlbelo1_ppn,1'b0,csr_tlbelo1_g,csr_tlbelo1_mat,csr_tlbelo1_plv,csr_tlbelo1_d,csr_tlbelo1_v};

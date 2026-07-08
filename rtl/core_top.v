@@ -1108,6 +1108,7 @@ module core_top(
     wire mem_ex_ale_w;
     wire [31:0] exe2_dram_rdata;
     wire [31:0] mem_data_addr;
+    wire [31:0] mem_data_paddr;   // 物理地址流水线，供 difftest StoreEvent
     wire mem_need_cancel;
     wire mem_inst_tlbrd;
     assign exe2_data_addr = data_sram_addr ;
@@ -1138,6 +1139,7 @@ module core_top(
         .exe2_dram_re(exe2_dram_re),
         .exe2_dram_we(exe2_dram_we_eff),   // sc.w 失败时置0：不产生 StoreEvent、rd写0
         .exe2_data_addr(exe2_data_addr),
+        .exe2_data_paddr(data_addr),   // TLB/DMW 翻译后物理地址，供 difftest StoreEvent
         .exe2_inst(exe2_inst),
         .exe2_rd(exe2_rd),
         //.exe2_br_taken(exe2_br_taken),
@@ -1225,6 +1227,7 @@ module core_top(
         .mem_ex_ale_h(mem_ex_ale_h),
         .mem_ex_ale_w(mem_ex_ale_w),
         .mem_data_addr(mem_data_addr),
+        .mem_data_paddr(mem_data_paddr),
         .mem_need_cancel(mem_need_cancel),
         .mem_inst_tlbrd(mem_inst_tlbrd),
         .mem_inst_tlbsrch(mem_inst_tlbsrch),
@@ -1276,13 +1279,18 @@ module core_top(
     // Stores in EXE2 are younger than the instruction currently in MEM. If MEM
     // already carries a real exception, the EXE2 store must not issue an
     // irreversible data write before the exception redirects the pipeline at WB.
+    // 注意：只抑制“同步异常”（store 自身/下游的 ALE/TLB/ADEF/SYS/BRK/INE）的 store 写。
+    // 不含中断（原 mem_has_int/exe2_has_int 已移除）：中断由 WB 实时判定 wb_int_live
+    // 且被 ~wb_dram_we 推迟到 store 之后，故被中断的 store 应正常完成物理写；若这里仍
+    // 用流水线中断标记抑制其写，会造成“store 提交但内存未写”的失配（观测：a0643e50
+    // st.w 的写被压掉，读回旧值 0xa063ba54 而非 1）。younger 指令的 flush 仍由 wb_ex 覆盖。
     assign mem_trap_pending = !mem_need_cancel && !mem_is_ertn &&
-                              (mem_has_int || mem_ex_adef || mem_ex_brk || mem_ex_ine ||
+                              (mem_ex_adef || mem_ex_brk || mem_ex_ine ||
                                mem_ex_ale || mem_is_syscall ||
                                (mem_inst_tlb_ex != 2'b0) || (mem_data_tlb_ex != 3'b0));
 
     assign exe2_self_trap = !exe2_need_cancel && !exe2_is_ertn &&
-                            (exe2_has_int || exe2_ex_adef || exe2_ex_brk || exe2_ex_ine ||
+                            (exe2_ex_adef || exe2_ex_brk || exe2_ex_ine ||
                              exe2_ex_ale || exe2_is_syscall ||
                              (exe2_inst_tlb_ex != 2'b0) || (data_tlb_ex != 3'b0));
 
@@ -1371,6 +1379,7 @@ module core_top(
     assign mem_data_shake_ok = (mem_need_data_sram || mem_is_cacop) ?  (data_sram_data_ok===1'b1 || mem_data_tlb_ex!=3'b0 || mem_trap_pending) : 1'b1;
     assign data_sram_wr = exe2_dram_we_eff;
     assign mem_need_and_data_ok = mem_need_data_sram && (data_sram_data_ok===1'b1);
+
    // assign data_sram_en=1'b1;
     //assign data_sram_wdata=mem_dram_wdata;
     assign data_sram_wdata =  exe2_wdram_num==0?  exe2_dram_wdata:
@@ -1422,6 +1431,7 @@ module core_top(
     wire wb_rdram_need_zero_extend;
     wire wb_rdram_need_signed_extend;
     wire [31:0] wb_data_addr;
+    wire [31:0] wb_data_paddr;   // 物理地址流水线，供 difftest StoreEvent
     wire [13:0] wb_csr_num;
     wire wb_csr_we;
     wire wb_is_ertn_raw;
@@ -1487,6 +1497,7 @@ module core_top(
         .mem_rdram_need_zero_extend(mem_rdram_need_zero_extend),
         .mem_rdram_need_signed_extend(mem_rdram_need_signed_extend),
         .mem_data_addr(mem_data_addr),
+        .mem_data_paddr(mem_data_paddr),
         .mem_csr_num(mem_csr_num),
         .mem_csr_we(mem_csr_we),
         .mem_is_ertn(mem_is_ertn),
@@ -1537,6 +1548,7 @@ module core_top(
         .wb_rdram_need_signed_extend(wb_rdram_need_signed_extend),
         .wb_rdram_need_zero_extend(wb_rdram_need_zero_extend),
         .wb_data_addr(wb_data_addr),
+        .wb_data_paddr(wb_data_paddr),
         .wb_csr_num(wb_csr_num),
         .wb_csr_we(wb_csr_we),
         .wb_is_ertn(wb_is_ertn_raw),
@@ -1709,14 +1721,30 @@ module core_top(
     wire trap_flush;
     wire trap_ertn;
 
+    // 中断在提交(WB)边界按“当前 CSR 状态”实时判定，取代 ID 段采样 + 流水线携带的
+    // wb_has_int。后者在“IE 刚被前一条 csrxchg 使能”时会漏标当前指令（该指令过 ID
+    // 时 IE 尚未更新），使 DUT 晚于 NEMU 认中断（观测：REF 在 IE 使能后第一条 a09c0c58
+    // 取中断，DUT 却执行了它、era 保持 0）。改为在 WB 用 (ESTAT.IS & ECFG.LIE) & IE 对
+    // 正在提交的有效指令实时判定 → victim=wb_pc，与 NEMU 的指令边界精确判定一致。
+    //   门控：wb_valid(已含 ~need_cancel)、~wb_is_ertn(ertn 提交拍 IE 仍为旧值,自然为0,
+    //   仍显式排除)、~idle_wait_r(idle 等待/唤醒走 idle_wake 专路)。
+    //   ~wb_dram_we：不在“正在提交的 store（含成功的 sc.w）”上取中断。store 的访存
+    //     副作用早在 EXE2 发起、到 WB 已写入 SRAM 不可撤销；若此拍 squash 该指令，
+    //     DUT 内存已变但 difftest 中断早退不把该 store 应用到 NEMU → 内存失配
+    //     (观测：mutex_unlock 的 sc.w@a07b5618 被中断，DUT mutex=0 而 REF 仍锁定)。
+    //     改为让该 store 完整提交、把中断推迟到下一条指令边界（精确中断合法），
+    //     NEMU 亦随 store_commit 执行该 store，两侧内存一致。
+    // 说明：csr_estat_is/csr_ecfg_lie/csr_crmd_ie/wb_valid/wb_dram_we 均为本模块 net/reg，前向引用合法。
+    wire wb_int_live = wb_valid & ~wb_is_ertn & ~idle_wait_r & ~wb_is_idle_commit & ~wb_dram_we
+                     & (|(csr_estat_is & csr_ecfg_lie)) & csr_crmd_ie;
+
     // trap_unit.v 实例化 - WB阶段异常检测和处理
     trap_unit u_trap_unit(
         .clk(clk),
         .rst(rst),
-        // Re-check IE at WB: interrupt detected in ID may have IE cleared by now
-        // idle_wake：从 idle 等待中被唤醒时，中断在 WB 处才挂起，流水线透传的
-        // wb_has_int 尚为 0，需在此补入，令 WB 上的 idle+4 响应中断（era=idle+4）。
-        .wb_has_int((wb_has_int | idle_wake) && csr_crmd_ie),
+        // WB 边界实时中断判定 wb_int_live（已含 IE）；idle_wake 保留 idle 唤醒专路。
+        // 不再使用流水线携带的 wb_has_int（时机不精确，且可能携带已消失的中断）。
+        .wb_has_int((wb_int_live | idle_wake) && csr_crmd_ie),
         .wb_int_ecode(wb_int_ecode),
         .wb_int_esubcode(wb_int_esubcode),
         .wb_ex_adef(wb_ex_adef),
@@ -1805,24 +1833,6 @@ module core_top(
     end
     // synthesis translate_on
 
-    /* MEM store trace — memcpy region only */
-    always @(posedge clk) begin
-        if (!rst && mem_pc >= 32'h1c000184 && mem_pc <= 32'h1c000198) begin
-            if (mem_dram_we)
-                $display("[MEM-ST] %0t: waddr=%h wdata=%h pc=%h",
-                    $time, mem_dram_waddr, mem_dram_wdata, mem_pc);
-        end
-    end
-    /* Exception trace */
-    always @(posedge clk) begin
-        if (!rst && wb_ex)
-            $display("[EX] %0t: ecode=%h id_adef=%b wb_adef=%b ale=%b pc=%h dmw0=%h dmw1=%h",
-                $time, wb_ecode, id_ex_adef, wb_ex_adef, wb_ex_ale, wb_pc,
-                csr_dmw0, csr_dmw1);
-    end
-
-
-
     // Wb_stage current exception detection is handled by trap_unit.
     // Wb_stage wb_stage(
     //     .wb_is_syscall(wb_is_syscall),
@@ -1844,7 +1854,11 @@ module core_top(
 
     wire [7:0]hw_int_in;
 
-    assign hw_int_in = 8'b0 ;
+    // 8 条硬件中断线（HWI0..HWI7）直接来自顶层 intrpt 端口，接入 CSR.ESTAT.IS[9:2]。
+    // 原实现硬连 0，导致所有外设硬件中断（UART/MAC/DMA 等，经 SoC intrpt 送入）
+    // 永远无法被记录到 ESTAT，CPU 无法响应外设中断——真功能缺陷，流片后外设中断失效。
+    // 手册：ESTAT.IS[9:2] 记录 8 个硬件中断输入，高电平有效。
+    assign hw_int_in = intrpt ;
 
     wire [31:0] coueid_in=32'b0;
     wire ipi_int_in=1'b0;
@@ -2132,28 +2146,6 @@ module core_top(
     );
 
     // Debug n53_ale_ld_w_ex exception path.
-    // synthesis translate_off
-    always @(posedge clk) begin
-        if (!rst && (
-            (exe1_pc >= 32'h1c075468 && exe1_pc <= 32'h1c07548c) ||
-            (exe2_pc >= 32'h1c075468 && exe2_pc <= 32'h1c07548c) ||
-            (mem_pc  >= 32'h1c075468 && mem_pc  <= 32'h1c07548c) ||
-            (wb_pc   >= 32'h1c075468 && wb_pc   <= 32'h1c07548c) ||
-            (data_sram_addr >= 32'h000cfde0 && data_sram_addr <= 32'h000cfde4) ||
-            (mem_data_addr  >= 32'h000cfde0 && mem_data_addr  <= 32'h000cfde4) ||
-            (wb_data_addr   >= 32'h000cfde0 && wb_data_addr   <= 32'h000cfde4)
-        )) begin
-            $display("[N53_ALEDBG] t=%0t exe1 pc=%h inst=%h src1=%h src2=%h alu=%h ale_h=%b ale_w=%b ale=%b need=%b ld=%b st=%b cancel=%b",
-                     $time, exe1_pc, exe1_inst, alu_src1, alu_src2, exe1_alu_result, exe1_ex_ale_h, exe1_ex_ale_w, exe1_ex_ale, exe1_need_data_sram, exe1_is_ld, exe1_is_st, exe1_need_cancel);
-            $display("[N53_ALEDBG] t=%0t exe2 pc=%h inst=%h alu=%h data_addr=%h re=%b we=%b need=%b ale_h=%b ale_w=%b ale=%b self_trap=%b req=%b wr=%b wstrb=%b addr_ok=%b dtlb_ex=%h cancel=%b",
-                     $time, exe2_pc, exe2_inst, exe2_alu_result, exe2_data_addr, exe2_dram_re, exe2_dram_we, exe2_need_data_sram, exe2_ex_ale_h, exe2_ex_ale_w, exe2_ex_ale, exe2_self_trap, data_sram_req, data_sram_wr, data_sram_wstrb, data_sram_addr_ok, data_tlb_ex, exe2_need_cancel);
-            $display("[N53_ALEDBG] t=%0t mem  pc=%h inst=%h data_addr=%h re=%b we=%b need=%b ale_h=%b ale_w=%b ale=%b trap_pending=%b data_ok=%b dtlb_ex=%h cancel=%b",
-                     $time, mem_pc, mem_inst, mem_data_addr, mem_dram_re, mem_dram_we, mem_need_data_sram, mem_ex_ale_h, mem_ex_ale_w, mem_ex_ale, mem_trap_pending, data_sram_data_ok, mem_data_tlb_ex, mem_need_cancel);
-            $display("[N53_ALEDBG] t=%0t wb   pc=%h inst=%h data_addr=%h ale=%b adef=%b wb_ex=%b ecode=%h esub=%h ale_addr=%h csr_ex=%b cancel=%b inst_tlb=%h data_tlb=%h",
-                     $time, wb_pc, wb_inst, wb_data_addr, wb_ex_ale, wb_ex_adef, wb_ex, wb_ecode, wb_esubcode, wb_ex_ale_addr, csr_ex, wb_need_cancel, wb_inst_tlb_ex, wb_data_tlb_ex);
-        end
-    end
-    // synthesis translate_on
 
     IF_readygo_state If_readygo_state(
         .rst(rst),
@@ -2627,7 +2619,11 @@ module core_top(
     assign wb_is_load      = (wb_dram_we == 1'b0) && (wb_rdram_num != 2'b0 || wb_res_from_dram);
     assign wb_is_store     = (wb_dram_we == 1'b1);
     assign wb_store_mmio   = wb_is_store && (wb_data_addr >= 32'hbfe0_0000) && (wb_data_addr <= 32'hbfff_ffff);
-    assign wb_csr_rstat    = (wb_csr_we == 1'b0) && (wb_csr_num == 14'h5) && wb_valid;
+    // csr_rstat 必须由“这确实是一条 CSR 读指令”门控：wb_csr_num 对任意指令都取
+    // inst[23:10]，非 CSR 指令（如 bgeu 0x6c0016d7，该字段恰为 0x5）会误判为读 ESTAT，
+    // 把 rf_wdata 当成 ESTAT 值经 estat_sync 灌进 NEMU（观测到 estat_to_nemu=0xa09eea90，
+    // 低 13 位 0xa90 污染 NEMU 硬件中断位），使 REF 凭空多出中断。加 wb_res_from_csr 门控。
+    assign wb_csr_rstat    = wb_res_from_csr && (wb_csr_we == 1'b0) && (wb_csr_num == 14'h5) && wb_valid;
     assign wb_is_tlbfill   = wb_tlb_fill_en && wb_valid;
     assign wb_tlbfill_index = csr_timer_64[3:0];
 
@@ -2643,10 +2639,12 @@ module core_top(
                               ((csr_crmd_plv == 2'h3 && csr_dmw1_plv3) ||
                                (csr_crmd_plv == 2'h0 && csr_dmw1_plv0)) &&
                               (wb_data_addr[31:29] == csr_dmw1_vseg);
-    assign wb_store_paddr   = (csr_crmd_da && !csr_crmd_pg) ? wb_data_addr :
-                              wb_store_dmw0_en              ? {csr_dmw0_pseg, wb_data_addr[28:0]} :
-                              wb_store_dmw1_en              ? {csr_dmw1_pseg, wb_data_addr[28:0]} :
-                                                               wb_data_addr;
+    // wb_store_paddr：直接取流水线携带的 TLB/DMW 翻译后物理地址 wb_data_paddr（源自 EXE2
+    // 的 data_addr，已覆盖 direct/DMW0/DMW1/TLB 全部情形）。原实现只在 WB 用 CSR 重算，
+    // 漏了 TLB 映射分支（fallback 误用虚地址 wb_data_addr），导致用户态首个 TLB 翻译 store
+    // 上报 paddr=vaddr=0x24558c，与 NEMU 正确翻译的物理地址失配。物理写内存本就用 data_addr，
+    // 故此修复仅纠正 difftest 上报，不改变 FPGA/流片访存行为。
+    assign wb_store_paddr   = wb_data_paddr;
 
     // cmt_* staging registers (1-cycle delay)
     reg         cmt_valid;
@@ -2689,9 +2687,19 @@ module core_top(
             // idle 冻结期间 idle+4 停在 WB，不得重复提交（NEMU 停在 idle 处）
             cmt_valid           <= wb_valid && !wb_ex && !idle_freeze;
             cmt_cnt_instr       <= wb_res_from_cnt | wb_is_csrrd_tval;
-            cmt_stable_counter  <= csr_timer_64;
-            cmt_inst_ld_en      <= wb_is_load;
-            cmt_inst_st_en      <= wb_is_store ? (wb_is_sc_w              ? 8'b0000_1000 :  // sc.w 成功
+            // rdcntvl/vh.w：寄存器写入的是 ID 拍采样、经流水线携带到 WB 的 wb_res_of_cnt，
+            // 而此处若直接送 live csr_timer_64（WB 拍），NEMU 会比 DUT 快 ID→WB 的流水线深度
+            // （实测 +4）。故按读取半字用 wb_res_of_cnt 重建，令 NEMU 读回与 DUT 寄存器一致。
+            cmt_stable_counter  <= (wb_res_from_cnt & (wb_inst[14:10]==5'h18)) ? {csr_timer_64[63:32], wb_res_of_cnt} : // rdcntvl.w：低半字
+                                   (wb_res_from_cnt & (wb_inst[14:10]==5'h19)) ? {wb_res_of_cnt, csr_timer_64[31:0]} : // rdcntvh.w：高半字
+                                                                                 csr_timer_64;
+            cmt_inst_ld_en      <= wb_is_load && wb_valid && !wb_ex && !idle_freeze;
+            // StoreEvent/LoadEvent 必须与 cmt_valid 用同一异常门控：faulting store（如
+            // st.w 触发 PIS，wb_ex=1）的物理 SRAM 写已被 data_side_effect_block 压制，NEMU
+            // 也因取异常不写内存；若这里仍按 wb_is_store 上报，会给 NEMU 强灌一次并不存在的
+            // store（观测：dut different at paddr=0x24558c），造成内存失配。故加 !wb_ex 门控。
+            cmt_inst_st_en      <= (wb_is_store && wb_valid && !wb_ex && !idle_freeze) ?
+                                                  (wb_is_sc_w              ? 8'b0000_1000 :  // sc.w 成功
                                                    (wb_wdram_num == 2'b00) ? 8'b0000_0100 :
                                                    (wb_wdram_num == 2'b10) ? 8'b0000_0010 :
                                                    (wb_wdram_num == 2'b01) ? 8'b0000_0001 :

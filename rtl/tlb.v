@@ -81,17 +81,6 @@ module tlb
 );
 
     reg  [TLBNUM-1:0]tlb_e;
-    reg  [TLBNUM-1:0] prev_tlb_e = {TLBNUM{1'b0}};
-    always @(posedge clk) prev_tlb_e <= tlb_e;
-    always @(posedge clk) if (tlb_e != prev_tlb_e) begin
-        $display("[TLB-E-CHG] %0t: old=%b new=%b we=%b invtlb_valid=%b rst=%b invtlb_op=%d",
-            $time, prev_tlb_e, tlb_e, we, invtlb_valid, rst, invtlb_op);
-        $display("[TLB-E-CHG]   DATA-WR block: ");
-        // also print the match signals to see if address translation writes
-        $display("[TLB-E-CHG]   s0_found=%b s1_found=%b s2_found=%b",
-            s0_found, s1_found, s2_found);
-    end
-    initial $display("[TLB-INIT] %0t: tlb_e=%b tlb_vppn[0]=%h", $time, tlb_e, tlb_vppn[0]);
     reg [TLBNUM-1:0] tlb_ps4MB;       // 1:4MB     0:4KB
     reg [18:0] tlb_vppn [TLBNUM-1:0];
     reg [9:0] tlb_asid [TLBNUM-1:0];
@@ -377,8 +366,6 @@ module tlb
      begin
         if(we)
         begin
-        $display("[TLB-WR] %0t: w_index=%d w_vppn=%h w_ps=%h w_asid=%h w_e=%b w_g=%b w_ppn0=%h w_ppn1=%h",
-            $time, w_index, w_vppn, w_ps, w_asid, w_e, w_g, w_ppn0, w_ppn1);
         tlb_vppn [w_index] <= w_vppn;
         tlb_asid [w_index] <= w_asid;
         tlb_g    [w_index] <= w_g; 
@@ -398,12 +385,7 @@ module tlb
 
      //读操作
     assign r_vppn  =  tlb_vppn [r_index];
-    // DEBUG: read port access
-    always @(posedge clk) begin
-        if ($time > 1233000 && tlb_e != 16'b0)
-            $display("[TLB-RACC] %0t: r_index=%d tlb_e=%b", $time, r_index, tlb_e);
-    end
-    assign r_asid  =  tlb_asid [r_index]; 
+    assign r_asid  =  tlb_asid [r_index];
     assign r_g     =  tlb_g    [r_index]; 
     assign r_ps    =  tlb_ps4MB[r_index] ? 6'd21 : 6'd12; 
     assign r_e     =  tlb_e    [r_index]; 
@@ -426,16 +408,13 @@ module tlb
         if(rst)
         begin
             tlb_e <= {TLBNUM{1'b0}};
-            $display("[TLB-RST] %0t: tlb_e cleared", $time);
         end
         else if(we)
         begin
-            $display("[TLB-E-WR] %0t: w_index=%d w_e=%b", $time, w_index, w_e);
             tlb_e[w_index]  <=w_e;
         end
         else if(invtlb_valid)
         begin
-            $display("[TLB-INV] %0t: invtlb_op=%d", $time, invtlb_op);
             case (invtlb_op)
                 5'd0   :    begin
                     tlb_e <= 16'b0;
